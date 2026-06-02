@@ -1,0 +1,44 @@
+# Secrets — NEVER commit
+.env
+.env.local
+*.key
+*secret*
+
+# External repo (clone separately; CC-BY-NC-SA from upstream)
+# Users should run: git clone https://github.com/ntua-unit-of-control-and-informatics/pinn-mpc external
+external/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Results / experiment artifacts
+results/
+runs/
+data/*.npz
+data/*.pt
+*.log
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Model checkpoints (large)
+*.ckpt
+*.pth
+*.bin
