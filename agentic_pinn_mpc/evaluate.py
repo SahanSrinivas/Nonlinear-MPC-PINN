@@ -24,17 +24,23 @@ from .pinn_siso import DEVICE, PINN_Controller
 
 @dataclass
 class EvalScenario:
-    """Match Kardamaki et al. 2026 SISO scenario constants (Section 4.1.1)."""
-    K_VALVE: float = 0.7        # m^0.5/s outflow coefficient
-    A: float = 1.0              # m^2 tank cross-section
-    dt: float = 0.01            # plant integration step (s)
-    Ts: float = 1.0             # controller sampling time (s)
-    sim_time: float = 30.0      # total simulation per episode (s)
-    sp_change: float = 5.0      # setpoint step time (s)
-    d_step: float = 30.0        # disturbance step time (s; >sim_time = no step)
-    noise: float = 0.0          # measurement noise std
+    """Match Kardamaki et al. 2026 SISO evaluation EXACTLY (notebook cell 26).
 
-    # Episode sampling bounds (Section 4.1.1)
+    Their evaluate_model_parallel_dist is called with:
+      sp_change=0.0  (setpoint applied at t=0)
+      d_step=0.0     (disturbance applied at t=0)
+      simulation_time=30.0
+    """
+    K_VALVE: float = 0.7        # m^0.5/s outflow coefficient (paper Sec 4.1.1)
+    A: float = 1.0              # m^2 tank cross-section (paper Sec 4.1.1)
+    dt: float = 0.01            # plant integration step (s) - cell 26
+    Ts: float = 1.0             # controller sampling time (s) - cell 26
+    sim_time: float = 30.0      # cell 26 simulation_time=30.0
+    sp_change: float = 0.0      # cell 26 sp_change=0.0 (sp applied at t=0)
+    d_step: float = 0.0         # cell 26 d_step=0.0 (disturbance at t=0)
+    noise: float = 0.0          # cell 26 noise=0.0
+
+    # Episode sampling bounds (Section 4.1.1, paragraphs after Eq 20)
     x0_lo: float = 0.0
     x0_hi: float = 3.0
     u0_lo: float = 0.0
@@ -123,11 +129,29 @@ def sample_episodes(n: int, scen: EvalScenario | None = None,
     }
 
 
+def load_kardamaki_test_samples(path: str | None = None) -> dict:
+    """Load Kardamaki's exact 5000-episode SISO test samples.
+
+    Returns dict with x0_sp, ysp_sp, d0_sp (set-point tracking, d0=0)
+    and x0_dr, ysp_dr, d0_dr (disturbance rejection, d0 in [0, 0.4]).
+
+    For direct head-to-head comparison with Kardamaki Table 4 numbers, use
+    `evaluate_model(..., use_kardamaki_samples=True)`.
+    """
+    if path is None:
+        from pathlib import Path
+        path = (Path(__file__).parent.parent / "external"
+                / "siso_test_samples.pt")
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    return {k: v.to(DEVICE) for k, v in data.items() if hasattr(v, "to")}
+
+
 @torch.no_grad()
 def evaluate_model(model: PINN_Controller, n_tracking: int = 500,
                     n_disturbance: int = 500,
                     scen: EvalScenario | None = None,
-                    seed: int = 0) -> dict:
+                    seed: int = 0,
+                    use_kardamaki_samples: bool = False) -> dict:
     """Run set-point tracking + disturbance rejection suites; return metrics.
 
     Metrics (matching Kardamaki Table 4):
@@ -139,22 +163,39 @@ def evaluate_model(model: PINN_Controller, n_tracking: int = 500,
     scen = scen or EvalScenario()
     model.eval()
 
-    # Set-point tracking suite (d0=0)
-    eps_t = sample_episodes(n_tracking, scen, mode="tracking", seed=seed)
-    res_t = rollout_batch(model, eps_t["x0"], eps_t["ysp"],
-                            eps_t["u0"], eps_t["d0"], scen)
+    if use_kardamaki_samples:
+        # Use their exact 5000-episode test set (siso_test_samples.pt).
+        # u0 defaults to None (cell 26 passes None) -> controller sets to ss.
+        ks = load_kardamaki_test_samples()
+        x0_t  = ks["x0_sp"][:n_tracking]
+        ysp_t = ks["ysp_sp"][:n_tracking]
+        d0_t  = ks["d0_sp"][:n_tracking]
+        u0_t  = scen.K_VALVE * torch.sqrt(x0_t.clamp(min=0.0))   # u_ss default
+        x0_d  = ks["x0_dr"][:n_disturbance]
+        ysp_d = ks["ysp_dr"][:n_disturbance]
+        d0_d  = ks["d0_dr"][:n_disturbance]
+        u0_d  = scen.K_VALVE * torch.sqrt(x0_d.clamp(min=0.0))
+    else:
+        # Our random sampling (good for tuner search to avoid overfitting test)
+        eps_t = sample_episodes(n_tracking, scen, mode="tracking", seed=seed)
+        x0_t, ysp_t, u0_t, d0_t = (eps_t["x0"], eps_t["ysp"],
+                                      eps_t["u0"], eps_t["d0"])
+        eps_d = sample_episodes(n_disturbance, scen, mode="disturbance",
+                                  seed=seed + 1)
+        x0_d, ysp_d, u0_d, d0_d = (eps_d["x0"], eps_d["ysp"],
+                                      eps_d["u0"], eps_d["d0"])
+
+    # Set-point tracking suite
+    res_t = rollout_batch(model, x0_t, ysp_t, u0_t, d0_t, scen)
     final_x_t = res_t["X"][:, -1]
-    offset_t = (final_x_t - eps_t["ysp"].cpu()).abs().numpy()
+    offset_t = (final_x_t - ysp_t.cpu()).abs().numpy()
     track_mean = float(offset_t.mean())
     track_max  = float(offset_t.max())
 
-    # Disturbance rejection suite (d0>0)
-    eps_d = sample_episodes(n_disturbance, scen, mode="disturbance",
-                             seed=seed + 1)
-    res_d = rollout_batch(model, eps_d["x0"], eps_d["ysp"],
-                            eps_d["u0"], eps_d["d0"], scen)
+    # Disturbance rejection suite
+    res_d = rollout_batch(model, x0_d, ysp_d, u0_d, d0_d, scen)
     final_x_d = res_d["X"][:, -1]
-    offset_d = (final_x_d - eps_d["ysp"].cpu()).abs().numpy()
+    offset_d = (final_x_d - ysp_d.cpu()).abs().numpy()
     dist_mean = float(offset_d.mean())
     dist_max  = float(offset_d.max())
 
