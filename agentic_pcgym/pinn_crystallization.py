@@ -141,6 +141,11 @@ class CrystPINNHparams:
     # Time discretisation (30 hr episode, 30 steps)
     T_horizon: float = 30.0   # hours
     Ts:        float = 1.0    # controller dt (hours)
+    # Importance sampling on hard episodes (extreme setpoints).
+    # alpha=0 -> uniform; alpha=1 -> hard episodes (top quantile of |CV-1|+|Ln-15|/15)
+    # weighted up to (1+alpha)x relative to easy episodes.
+    importance_alpha: float = 0.0
+    importance_quantile: float = 0.5
 
 
 # Self-test (architecture only - no training here)

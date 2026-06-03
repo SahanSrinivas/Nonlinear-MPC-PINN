@@ -176,6 +176,12 @@ class DPCRefineCfg:
     w_bounds: float = 10.0       # state-bound soft penalty
     early_stop_patience: int = 20
     seed: int = 0
+    # NEW: subset selector (applied when sampling from train_data).
+    # 'mixed' = whole pool. 'easy' = small |x0 - sp| episodes (Phase 1 warm-up).
+    # 'hard' = large |x0 - sp| (Phase 2 refinement). Reduces the distribution-
+    # shift problem we hit on SISO and mirrors the two-phase DPC pattern.
+    mode: str = "mixed"
+    hard_quantile: float = 0.5   # episodes above this quantile of |x0-sp| are 'hard'
 
 
 def refine_crystallization_dpc(
@@ -183,8 +189,17 @@ def refine_crystallization_dpc(
         cfg: DPCRefineCfg | None = None,
         params: CrystParams | None = None,
         verbose: bool = False,
+        train_data: dict | None = None,
         ) -> dict:
-    """Differentiable closed-loop refinement for crystallization PINN."""
+    """Differentiable closed-loop refinement for crystallization PINN.
+
+    Args:
+      train_data: optional pre-sampled training episodes dict. When provided,
+                  DPC samples batches from this pool (matching training+eval
+                  distribution and preventing the distribution-shift bug that
+                  destroyed the SISO refinement on first attempt).
+                  Falls back to fresh random sampling if not provided.
+    """
     from .data_gen import sample_crystallization_episodes
     cfg = cfg or DPCRefineCfg()
     params = params or CrystParams()
@@ -193,14 +208,44 @@ def refine_crystallization_dpc(
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     hist = {"loss": [], "offset": []}
     best, bad = float("inf"), 0
+
+    # Pre-compute hard/easy index pools (used when mode != 'mixed')
+    pool_idx = None
+    if train_data is not None:
+        N_total = train_data["mu0_all"].shape[0]
+        if cfg.mode in ("easy", "hard"):
+            # "Difficulty" = magnitude of CV/L_n setpoint excursion from
+            # the steady operating point (CV~1.0, L_n~15.0). High = harder.
+            cv_dev = (train_data["cv_sp_all"] - 1.0).abs()
+            ln_dev = (train_data["ln_sp_all"] - 15.0).abs() / 15.0
+            difficulty = (cv_dev + ln_dev).cpu()
+            thresh = torch.quantile(difficulty, cfg.hard_quantile)
+            if cfg.mode == "hard":
+                pool_idx = torch.where(difficulty >= thresh)[0]
+            else:
+                pool_idx = torch.where(difficulty < thresh)[0]
+            if verbose:
+                print(f"  DPC pool '{cfg.mode}': {len(pool_idx)} of {N_total} episodes")
+        else:
+            pool_idx = torch.arange(N_total)
+
     for ep in range(1, cfg.epochs + 1):
-        eps = sample_crystallization_episodes(
-            N=cfg.bs, seed=ep, query_nmpc=False, verbose=False)
-        x0 = torch.stack([eps[k] for k in ["mu0_all", "mu1_all", "mu2_all",
-                                              "mu3_all", "c_all"]], dim=1).to(DEVICE)
-        cv_sp = eps["cv_sp_all"].to(DEVICE)
-        ln_sp = eps["ln_sp_all"].to(DEVICE)
-        Tc_init = eps["Tc_all"].to(DEVICE)
+        if train_data is not None:
+            sel = pool_idx[torch.randint(0, len(pool_idx), (cfg.bs,))]
+            x0 = torch.stack([train_data[k][sel] for k in
+                              ["mu0_all", "mu1_all", "mu2_all",
+                               "mu3_all", "c_all"]], dim=1).to(DEVICE)
+            cv_sp = train_data["cv_sp_all"][sel].to(DEVICE)
+            ln_sp = train_data["ln_sp_all"][sel].to(DEVICE)
+            Tc_init = train_data["Tc_all"][sel].to(DEVICE)
+        else:
+            eps = sample_crystallization_episodes(
+                N=cfg.bs, seed=ep, query_nmpc=False, verbose=False)
+            x0 = torch.stack([eps[k] for k in ["mu0_all", "mu1_all", "mu2_all",
+                                                  "mu3_all", "c_all"]], dim=1).to(DEVICE)
+            cv_sp = eps["cv_sp_all"].to(DEVICE)
+            ln_sp = eps["ln_sp_all"].to(DEVICE)
+            Tc_init = eps["Tc_all"].to(DEVICE)
         roll = differentiable_rollout_crystallization(
             net, x0, cv_sp, ln_sp, Tc_init,
             n_steps=CrystScenario().n_steps, dt=CrystScenario().dt_hr,
@@ -239,7 +284,15 @@ def refine_fourtank_dpc(
         cfg: DPCRefineCfg | None = None,
         params: FourTankParams | None = None,
         verbose: bool = False,
+        train_data: dict | None = None,
         ) -> dict:
+    """Differentiable closed-loop refinement for four-tank PINN.
+
+    Args:
+      train_data: optional pre-sampled training episodes dict. When provided,
+                  DPC samples from this pool to match the training+eval
+                  distribution (prevents distribution shift).
+    """
     from .data_gen import sample_fourtank_episodes
     cfg = cfg or DPCRefineCfg()
     params = params or FourTankParams()
@@ -248,15 +301,44 @@ def refine_fourtank_dpc(
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     hist = {"loss": [], "offset": []}
     best, bad = float("inf"), 0
+
+    pool_idx = None
+    if train_data is not None:
+        N_total = train_data["h1_all"].shape[0]
+        if cfg.mode in ("easy", "hard"):
+            # Difficulty = |x0 - sp| magnitude on h1, h2
+            d1 = (train_data["h1_all"] - train_data["h1_sp_all"]).abs()
+            d2 = (train_data["h2_all"] - train_data["h2_sp_all"]).abs()
+            difficulty = (d1 + d2).cpu()
+            thresh = torch.quantile(difficulty, cfg.hard_quantile)
+            if cfg.mode == "hard":
+                pool_idx = torch.where(difficulty >= thresh)[0]
+            else:
+                pool_idx = torch.where(difficulty < thresh)[0]
+            if verbose:
+                print(f"  DPC pool '{cfg.mode}': {len(pool_idx)} of {N_total} episodes")
+        else:
+            pool_idx = torch.arange(N_total)
+
     for ep in range(1, cfg.epochs + 1):
-        eps = sample_fourtank_episodes(N=cfg.bs, seed=ep, query_nmpc=False,
-                                          verbose=False)
-        x0 = torch.stack([eps[k] for k in ["h1_all", "h2_all", "h3_all",
-                                              "h4_all"]], dim=1).to(DEVICE)
-        h1_sp = eps["h1_sp_all"].to(DEVICE)
-        h2_sp = eps["h2_sp_all"].to(DEVICE)
-        v1_init = eps["v1_all"].to(DEVICE)
-        v2_init = eps["v2_all"].to(DEVICE)
+        if train_data is not None:
+            sel = pool_idx[torch.randint(0, len(pool_idx), (cfg.bs,))]
+            x0 = torch.stack([train_data[k][sel] for k in
+                              ["h1_all", "h2_all", "h3_all", "h4_all"]],
+                             dim=1).to(DEVICE)
+            h1_sp = train_data["h1_sp_all"][sel].to(DEVICE)
+            h2_sp = train_data["h2_sp_all"][sel].to(DEVICE)
+            v1_init = train_data["v1_all"][sel].to(DEVICE)
+            v2_init = train_data["v2_all"][sel].to(DEVICE)
+        else:
+            eps = sample_fourtank_episodes(N=cfg.bs, seed=ep, query_nmpc=False,
+                                              verbose=False)
+            x0 = torch.stack([eps[k] for k in ["h1_all", "h2_all", "h3_all",
+                                                  "h4_all"]], dim=1).to(DEVICE)
+            h1_sp = eps["h1_sp_all"].to(DEVICE)
+            h2_sp = eps["h2_sp_all"].to(DEVICE)
+            v1_init = eps["v1_all"].to(DEVICE)
+            v2_init = eps["v2_all"].to(DEVICE)
         roll = differentiable_rollout_fourtank(
             net, x0, h1_sp, h2_sp, v1_init, v2_init,
             n_steps=FourTankScenario().n_steps,

@@ -108,6 +108,10 @@ class FourTankPINNHparams:
     # Time discretisation (1000 s episode, 60 steps)
     T_horizon: float = 1000.0   # seconds
     Ts:        float = 1000.0 / 60.0   # ~16.67 s
+    # Importance sampling on hard episodes (large |x0 - sp|).
+    # alpha=0 -> uniform; alpha=1 -> hard episodes weighted up to 2x.
+    importance_alpha: float = 0.0
+    importance_quantile: float = 0.5
 
 
 if __name__ == "__main__":

@@ -359,7 +359,22 @@ def train_pinn_crystallization(
     arrays = [episodes[k] for k in keys]
     N_total = arrays[0].shape[0]
 
+    # Importance weights for hard episodes (extreme CV/L_n setpoints)
+    use_importance = getattr(hp, "importance_alpha", 0.0) > 0.0
+    if use_importance:
+        cv_dev = (episodes["cv_sp_all"] - 1.0).abs()
+        ln_dev = (episodes["ln_sp_all"] - 15.0).abs() / 15.0
+        difficulty = (cv_dev + ln_dev).cpu()
+        # Weight = 1 + alpha * (rank-normalised difficulty)
+        rank = torch.argsort(torch.argsort(difficulty)).float() / max(N_total - 1, 1)
+        weights = 1.0 + hp.importance_alpha * rank
+        weights = weights.clamp(min=1e-9)
+        torch.manual_seed(seed + 1)
+
     def get_batch(ep_idx):
+        if use_importance:
+            idx = torch.multinomial(weights, hp.bs, replacement=True)
+            return [a[idx] for a in arrays]
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
         if e <= N_total:
@@ -416,7 +431,21 @@ def train_pinn_fourtank(
     arrays = [episodes[k] for k in keys]
     N_total = arrays[0].shape[0]
 
+    # Importance weights for hard episodes (large |h - sp|)
+    use_importance = getattr(hp, "importance_alpha", 0.0) > 0.0
+    if use_importance:
+        d1 = (episodes["h1_all"] - episodes["h1_sp_all"]).abs()
+        d2 = (episodes["h2_all"] - episodes["h2_sp_all"]).abs()
+        difficulty = (d1 + d2).cpu()
+        rank = torch.argsort(torch.argsort(difficulty)).float() / max(N_total - 1, 1)
+        weights = 1.0 + hp.importance_alpha * rank
+        weights = weights.clamp(min=1e-9)
+        torch.manual_seed(seed + 1)
+
     def get_batch(ep_idx):
+        if use_importance:
+            idx = torch.multinomial(weights, hp.bs, replacement=True)
+            return [a[idx] for a in arrays]
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
         if e <= N_total:
