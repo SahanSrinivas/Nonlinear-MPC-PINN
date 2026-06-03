@@ -356,7 +356,8 @@ def train_pinn_crystallization(
     # Required keys
     keys = ["mu0_all", "mu1_all", "mu2_all", "mu3_all", "c_all",
              "cv_sp_all", "ln_sp_all", "Tc_all"]
-    arrays = [episodes[k] for k in keys]
+    # Move to DEVICE once (episodes from data_gen are CPU tensors).
+    arrays = [episodes[k].to(DEVICE) for k in keys]
     N_total = arrays[0].shape[0]
 
     # Importance weights for hard episodes (extreme CV/L_n setpoints)
@@ -374,6 +375,7 @@ def train_pinn_crystallization(
     def get_batch(ep_idx):
         if use_importance:
             idx = torch.multinomial(weights, hp.bs, replacement=True)
+            idx = idx.to(arrays[0].device)
             return [a[idx] for a in arrays]
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
@@ -428,7 +430,8 @@ def train_pinn_fourtank(
     hist_p1, hist_p2 = [], []
     keys = ["h1_all", "h2_all", "h3_all", "h4_all",
              "h1_sp_all", "h2_sp_all", "v1_all", "v2_all"]
-    arrays = [episodes[k] for k in keys]
+    # Move to DEVICE once (episodes from data_gen are CPU tensors).
+    arrays = [episodes[k].to(DEVICE) for k in keys]
     N_total = arrays[0].shape[0]
 
     # Importance weights for hard episodes (large |h - sp|)
@@ -445,6 +448,7 @@ def train_pinn_fourtank(
     def get_batch(ep_idx):
         if use_importance:
             idx = torch.multinomial(weights, hp.bs, replacement=True)
+            idx = idx.to(arrays[0].device)
             return [a[idx] for a in arrays]
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
