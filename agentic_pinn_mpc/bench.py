@@ -80,7 +80,8 @@ def train_and_score(cfg: dict, x0_all, u0_all, ysp_all, d0_all,
     t0 = time.time()
     metrics = evaluate_model(model, n_tracking=n_eval_tracking,
                               n_disturbance=n_eval_disturbance,
-                              seed=eval_seed)
+                              seed=eval_seed,
+                              use_kardamaki_samples=True)
     eval_time = time.time() - t0
     return {
         "score": metrics["combined_score"],
