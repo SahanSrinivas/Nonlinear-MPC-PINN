@@ -200,6 +200,12 @@ class PINNHparams:
     bs: int = 100
     T_horizon: float = 25.0
     Ts: float = 1.0
+    # Importance weighting on disturbance episodes during training.
+    # Final loss is scaled by (1 + (importance_d0_alpha * d0 / d0_max)) per
+    # episode, averaged over the batch. alpha=0 -> uniform (Kardamaki).
+    # alpha=2 -> high-d0 episodes weighted up to 3x.
+    importance_d0_alpha: float = 0.0
+    importance_d0_max: float = 0.4   # the d_hi bound from the paper
 
 
 def train_pinn_siso(hp: PINNHparams,
@@ -222,13 +228,28 @@ def train_pinn_siso(hp: PINNHparams,
     # Phase 1: dynamics + tracking only
     opt = torch.optim.Adam(model.parameters(), lr=hp.lr1)
     nan_at = None
+    # Pre-compute importance sampling weights if requested (oversamples high-d0
+    # episodes for the SAME loss term). alpha=0 -> uniform Kardamaki behavior.
+    use_importance = hp.importance_d0_alpha > 0.0
+    if use_importance:
+        weights = 1.0 + hp.importance_d0_alpha * (
+            d0_all.cpu() / max(hp.importance_d0_max, 1e-9))
+        weights = weights.clamp(min=1e-9)
+        torch.manual_seed(seed + 1)  # for the weighted sampler
     for ep in range(1, hp.K1 + 1):
-        start = (ep - 1) * hp.bs
-        end = start + hp.bs
-        x0 = x0_all[start:end]
-        u0 = u0_all[start:end]
-        ysp = ysp_all[start:end]
-        d0 = d0_all[start:end]
+        if use_importance:
+            idx = torch.multinomial(weights, hp.bs, replacement=True)
+            x0 = x0_all[idx]
+            u0 = u0_all[idx]
+            ysp = ysp_all[idx]
+            d0 = d0_all[idx]
+        else:
+            start = (ep - 1) * hp.bs
+            end = start + hp.bs
+            x0 = x0_all[start:end]
+            u0 = u0_all[start:end]
+            ysp = ysp_all[start:end]
+            d0 = d0_all[start:end]
         # Phase 1: w_du, w_u, w_x = 0
         loss, _ = model.loss(hp.bs, t_wp, N_WP, t_col, N_COL,
                               x0, u0, ysp, d0,
@@ -248,12 +269,19 @@ def train_pinn_siso(hp: PINNHparams,
     # Phase 2: all losses active
     opt = torch.optim.Adam(model.parameters(), lr=hp.lr2)
     for ep in range(1, hp.K2 + 1):
-        start = (ep - 1) * hp.bs
-        end = start + hp.bs
-        x0 = x0_all[start:end]
-        u0 = u0_all[start:end]
-        ysp = ysp_all[start:end]
-        d0 = d0_all[start:end]
+        if use_importance:
+            idx = torch.multinomial(weights, hp.bs, replacement=True)
+            x0 = x0_all[idx]
+            u0 = u0_all[idx]
+            ysp = ysp_all[idx]
+            d0 = d0_all[idx]
+        else:
+            start = (ep - 1) * hp.bs
+            end = start + hp.bs
+            x0 = x0_all[start:end]
+            u0 = u0_all[start:end]
+            ysp = ysp_all[start:end]
+            d0 = d0_all[start:end]
         loss, _ = model.loss(hp.bs, t_wp, N_WP, t_col, N_COL,
                               x0, u0, ysp, d0,
                               hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_utrk,

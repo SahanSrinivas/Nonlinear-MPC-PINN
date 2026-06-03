@@ -31,6 +31,11 @@ import torch
 from .pinn_siso import (DEVICE, PINNHparams, train_pinn_siso)
 from .evaluate import EvalScenario, evaluate_model
 from .tuners import HSPACE, TUNERS, make_tuner
+# Import side-effect-registers 'lean' tuner in TUNERS
+try:
+    from . import lean_tuner  # noqa: F401
+except Exception:
+    pass
 
 
 def load_training_data(data_dir: str | Path = None) -> tuple:
@@ -125,7 +130,11 @@ def run_tuner(tuner_name: str, n_trials: int,
             n_eval_disturbance=n_eval_disturbance,
         )
         score = result["score"]
-        tuner.tell(cfg, score)
+        # MOBOTuner needs full per-metric vector; others ignore the kwarg.
+        try:
+            tuner.tell(cfg, score, metrics=result.get("metrics"))
+        except TypeError:
+            tuner.tell(cfg, score)
         if score < best_score:
             best_score, best_cfg = score, dict(cfg)
         elapsed = time.time() - t0

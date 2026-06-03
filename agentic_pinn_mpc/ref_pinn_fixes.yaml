@@ -1,0 +1,149 @@
+# Reference PINN-MPC tuning playbook for the LEAN-style 3-agent tuner.
+#
+# Each entry maps a (diagnosed failure_mode, severity) -> a list of concrete
+# parameter perturbations the Strategy agent will hand to the Tuning agent.
+#
+# Failure modes are produced by the Diagnostic agent based on this dispatch:
+#   if tracking_mean_offset_m > kard_track_mean * (1 + tol):
+#       -> tracking_mean_high
+#   elif tracking_max_offset_m > kard_track_max * (1 + tol):
+#       -> tracking_max_high
+#   elif disturbance_mean_offset_m > kard_dist_mean * (1 + tol):
+#       -> disturbance_mean_high
+#   elif disturbance_max_offset_m > kard_dist_max * (1 + tol):
+#       -> disturbance_max_high
+#   else:
+#       -> all_in_band   (refine the dominant remaining axis)
+#
+# Severity tiers from the relative excess (X / kard - 1):
+#   < 0.20  -> mild
+#   0.20-0.50 -> moderate
+#   > 0.50  -> severe
+#
+# The deltas in `param_changes` are MULTIPLIERS relative to the current
+# config (1.0 = no change). The Tuning agent applies them with the bounded
+# space in HSPACE; values outside the bounds are clipped.
+
+kardamaki_reference:
+  tracking_mean_offset_m: 0.0161
+  tracking_max_offset_m: 0.0322
+  disturbance_mean_offset_m: 0.0129
+  disturbance_max_offset_m: 0.0453
+
+playbook:
+
+  - failure_mode: tracking_mean_high
+    severity: mild
+    rationale: "tracking offset slightly above Kardamaki; tighten w_ytrk gently"
+    param_changes:
+      w_ytrk: 1.20
+      lr1: 0.80
+      lr2: 0.90
+
+  - failure_mode: tracking_mean_high
+    severity: moderate
+    rationale: "tracking offset noticeably above Kardamaki; raise w_ytrk and slow training"
+    param_changes:
+      w_ytrk: 1.40
+      w_utrk: 1.15
+      lr1: 0.60
+      lr2: 0.75
+
+  - failure_mode: tracking_mean_high
+    severity: severe
+    rationale: "tracking offset is dominant failure; aggressive tracking weighting + reduced bounds penalty"
+    param_changes:
+      w_ytrk: 1.80
+      w_utrk: 1.30
+      w_du: 0.85
+      lr1: 0.50
+      lr2: 0.60
+
+  - failure_mode: tracking_max_high
+    severity: mild
+    rationale: "occasional tracking outliers; firm bounds on x and u"
+    param_changes:
+      w_x: 1.30
+      w_u: 1.20
+      w_ytrk: 1.10
+
+  - failure_mode: tracking_max_high
+    severity: moderate
+    rationale: "worst-case tracking offset elevated; firmer bounds + barrier"
+    param_changes:
+      w_x: 1.60
+      w_u: 1.40
+      w_ytrk: 1.25
+
+  - failure_mode: tracking_max_high
+    severity: severe
+    rationale: "tracking max blowing up; tight bounds + dominant tracking weight"
+    param_changes:
+      w_x: 2.00
+      w_u: 1.80
+      w_ytrk: 1.50
+      lr2: 0.70
+
+  - failure_mode: disturbance_mean_high
+    severity: mild
+    rationale: "disturbance rejection slightly weak; gentle w_du and disturbance oversample"
+    param_changes:
+      w_du: 1.30
+    train_changes:
+      importance_d0_alpha: 0.5
+
+  - failure_mode: disturbance_mean_high
+    severity: moderate
+    rationale: "disturbance rejection moderately weak; increase w_du, oversample d0>0.2"
+    param_changes:
+      w_du: 1.60
+      w_utrk: 1.15
+    train_changes:
+      importance_d0_alpha: 1.0
+
+  - failure_mode: disturbance_mean_high
+    severity: severe
+    rationale: "disturbance is dominant failure; aggressive w_du, heavy oversample, smaller lr2"
+    param_changes:
+      w_du: 2.20
+      w_utrk: 1.30
+      lr2: 0.70
+    train_changes:
+      importance_d0_alpha: 2.0
+
+  - failure_mode: disturbance_max_high
+    severity: mild
+    rationale: "occasional disturbance overshoot; firm input bounds"
+    param_changes:
+      w_du: 1.20
+      w_u: 1.20
+
+  - failure_mode: disturbance_max_high
+    severity: moderate
+    rationale: "disturbance worst-case elevated; firmer w_u + w_du + oversample"
+    param_changes:
+      w_du: 1.50
+      w_u: 1.40
+    train_changes:
+      importance_d0_alpha: 1.0
+
+  - failure_mode: disturbance_max_high
+    severity: severe
+    rationale: "disturbance worst-case blowing up; tight w_du, w_u, heavy oversample"
+    param_changes:
+      w_du: 2.00
+      w_u: 1.80
+      lr2: 0.70
+    train_changes:
+      importance_d0_alpha: 2.0
+
+  - failure_mode: all_in_band
+    severity: mild
+    rationale: "all metrics within tolerance; explore-vs-exploit a small perturbation around current best"
+    param_changes:
+      # ±15% randomized perturbation - the Tuning agent injects rng
+      w_ode: [0.90, 1.15]
+      w_ytrk: [0.90, 1.15]
+      w_du: [0.90, 1.15]
+      lr1: [0.85, 1.15]
+      lr2: [0.85, 1.15]

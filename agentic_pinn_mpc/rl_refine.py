@@ -99,7 +99,17 @@ def differentiable_rollout(model: PINN_Controller,
 
 @dataclass
 class DPCRefineCfg:
-    """Hparams for differentiable closed-loop refinement."""
+    """Hparams for differentiable closed-loop refinement.
+
+    Modes:
+      - 'mixed':       2/3 tracking + 1/3 disturbance episodes (original behavior)
+      - 'tracking':    tracking-only episodes (d0 = 0)
+      - 'disturbance': disturbance-only episodes (d0 sampled from [d_lo, d_hi])
+
+    The two-phase pattern: run 'tracking' first to refine baseline tracking,
+    then run 'disturbance' at lower lr to attack the disturbance gap without
+    disturbing tracking gains.
+    """
     epochs: int = 200              # refinement epochs (vs Kardamaki's 10000)
     bs: int = 32                   # episodes per batch (CL rollouts are expensive)
     lr: float = 1e-5               # very small - refine, don't disrupt
@@ -109,17 +119,29 @@ class DPCRefineCfg:
     w_bounds: float = 10.0         # soft penalty for x/u out of bounds
     seed: int = 0
     early_stop_patience: int = 20  # stop if no improvement
+    mode: str = "mixed"            # 'mixed' | 'tracking' | 'disturbance'
+    disturbance_oversample: float = 1.0  # weight high-d0 episodes by this factor
 
 
 def refine_with_dpc(model: PINN_Controller,
                      cfg: DPCRefineCfg | None = None,
                      scen: EvalScenario | None = None,
                      verbose: bool = False,
+                     train_data: tuple | None = None,
                      ) -> tuple[PINN_Controller, dict]:
     """Differentiable closed-loop refinement of a pre-trained PINN-MPC.
 
     The PINN parameters are updated by backprop through the closed-loop
     trajectory. Returns the refined model and a training history.
+
+    Args:
+      train_data: Optional (x0_all, u0_all, ysp_all, d0_all) tensors. When
+                  provided, DPC samples episodes from these (matching the
+                  PINN's training distribution + Kardamaki's evaluation
+                  distribution). When omitted, falls back to the legacy
+                  `sample_episodes` random sampler (which has a slight
+                  distribution shift relative to Kardamaki - typically hurts
+                  performance on well-tuned models).
     """
     cfg = cfg or DPCRefineCfg()
     scen = scen or EvalScenario()
@@ -129,18 +151,71 @@ def refine_with_dpc(model: PINN_Controller,
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
+    # Prepare mode-filtered indices once if training data is provided.
+    track_idx = dist_idx = mixed_idx = None
+    if train_data is not None:
+        x0_all, u0_all, ysp_all, d0_all = train_data
+        # tracking: d0 ≈ 0
+        track_idx = torch.where(d0_all.cpu() < 1e-6)[0]
+        dist_idx = torch.where(d0_all.cpu() >= 1e-6)[0]
+        mixed_idx = torch.arange(x0_all.shape[0])
+        if verbose:
+            print(f"  DPC training pool: {len(track_idx)} tracking, "
+                  f"{len(dist_idx)} disturbance, {len(mixed_idx)} total")
+
     hist = {"loss": [], "offset_mean": [], "offset_max": []}
     best_loss = float("inf")
     bad_streak = 0
     for ep in range(1, cfg.epochs + 1):
-        # Sample a fresh batch of test-distribution episodes
-        eps = sample_episodes(cfg.bs, scen, mode="tracking", seed=ep)
-        eps_d = sample_episodes(cfg.bs // 2, scen, mode="disturbance",
-                                  seed=ep + 10000)
-        x0 = torch.cat([eps["x0"], eps_d["x0"]])
-        ysp = torch.cat([eps["ysp"], eps_d["ysp"]])
-        u0 = torch.cat([eps["u0"], eps_d["u0"]])
-        d0 = torch.cat([eps["d0"], eps_d["d0"]])
+        # Sample episodes according to mode
+        if train_data is not None:
+            # Use Kardamaki training distribution - this matches the
+            # evaluation distribution and prevents the distribution shift
+            # that wrecks well-tuned models.
+            if cfg.mode == "tracking":
+                pool = track_idx
+            elif cfg.mode == "disturbance":
+                pool = dist_idx
+            else:
+                pool = mixed_idx
+            sel = pool[torch.randint(0, len(pool), (cfg.bs,))]
+            x0 = x0_all[sel]
+            u0 = u0_all[sel]
+            ysp = ysp_all[sel]
+            d0 = d0_all[sel]
+            if cfg.mode == "disturbance" and cfg.disturbance_oversample > 1.0:
+                k = int(cfg.bs * (cfg.disturbance_oversample - 1.0))
+                k = min(k, cfg.bs)
+                top_idx = torch.topk(d0, k).indices
+                x0 = torch.cat([x0, x0[top_idx]])
+                ysp = torch.cat([ysp, ysp[top_idx]])
+                u0 = torch.cat([u0, u0[top_idx]])
+                d0 = torch.cat([d0, d0[top_idx]])
+        else:
+            # Legacy path - sample_episodes (slight distribution shift)
+            if cfg.mode == "tracking":
+                eps = sample_episodes(cfg.bs, scen, mode="tracking", seed=ep)
+                x0, ysp, u0, d0 = eps["x0"], eps["ysp"], eps["u0"], eps["d0"]
+            elif cfg.mode == "disturbance":
+                eps = sample_episodes(cfg.bs, scen, mode="disturbance",
+                                        seed=ep + 10000)
+                x0, ysp, u0, d0 = eps["x0"], eps["ysp"], eps["u0"], eps["d0"]
+                if cfg.disturbance_oversample > 1.0:
+                    k = int(cfg.bs * (cfg.disturbance_oversample - 1.0))
+                    k = min(k, cfg.bs)
+                    top_idx = torch.topk(d0, k).indices
+                    x0 = torch.cat([x0, x0[top_idx]])
+                    ysp = torch.cat([ysp, ysp[top_idx]])
+                    u0 = torch.cat([u0, u0[top_idx]])
+                    d0 = torch.cat([d0, d0[top_idx]])
+            else:
+                eps = sample_episodes(cfg.bs, scen, mode="tracking", seed=ep)
+                eps_d = sample_episodes(cfg.bs // 2, scen, mode="disturbance",
+                                          seed=ep + 10000)
+                x0 = torch.cat([eps["x0"], eps_d["x0"]])
+                ysp = torch.cat([eps["ysp"], eps_d["ysp"]])
+                u0 = torch.cat([eps["u0"], eps_d["u0"]])
+                d0 = torch.cat([eps["d0"], eps_d["d0"]])
 
         # Rollout WITH gradients
         roll = differentiable_rollout(model, x0, ysp, u0, d0, scen)

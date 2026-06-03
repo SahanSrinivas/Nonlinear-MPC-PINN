@@ -312,6 +312,56 @@ class LLMTuner:
 
 
 # ---------------------------------------------------------------------------
+# Tuner 5: Multi-objective Bayesian Optimization (NSGA-II via Optuna)
+# ---------------------------------------------------------------------------
+# Optimizes over 4 metrics directly (tracking_mean, tracking_max,
+# disturbance_mean, disturbance_max) instead of a scalar composite. Returns
+# the Pareto front; for scoreboarding the bench picks the lowest combined
+# score on the front. Useful when LLM/scalar tuners trade away one metric
+# (e.g., disturbance) for another (e.g., tracking).
+class MOBOTuner:
+    name = "mobo"
+
+    def __init__(self, seed: int = 0):
+        import optuna
+        from optuna.samplers import NSGAIISampler
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # 4 objectives, all minimised
+        self.study = optuna.create_study(
+            directions=["minimize"] * 4,
+            sampler=NSGAIISampler(seed=seed))
+        self._pending: list = []
+        self.history: list = []
+
+    def ask(self) -> dict:
+        trial = self.study.ask()
+        cfg = {}
+        for name, (lo, hi, log) in HSPACE.items():
+            cfg[name] = trial.suggest_float(name, lo, hi, log=log)
+        self._pending.append(trial)
+        return _clip(dict(cfg))
+
+    def tell(self, cfg: dict, score: float, metrics: dict | None = None):
+        # MOBO expects a vector. If full metrics not provided, fall back to
+        # quartering the scalar score (degenerate but keeps the API working).
+        if metrics is None:
+            obj = [score, score, score, score]
+        else:
+            obj = [
+                metrics.get("tracking_mean_offset_m", score),
+                metrics.get("tracking_max_offset_m", score),
+                metrics.get("disturbance_mean_offset_m", score),
+                metrics.get("disturbance_max_offset_m", score),
+            ]
+            # Sanitise NaN/Inf (failed trials) - push them out of the Pareto
+            obj = [1e6 if (v is None or not np.isfinite(v)) else float(v)
+                   for v in obj]
+        trial = self._pending.pop(0)
+        self.study.tell(trial, obj)
+        self.history.append({"cfg": cfg, "score": score, "objectives": obj})
+
+
+# ---------------------------------------------------------------------------
 # Tuner registry
 # ---------------------------------------------------------------------------
 TUNERS = {
@@ -319,6 +369,7 @@ TUNERS = {
     "bo":     BOTuner,
     "optuna": OptunaTuner,
     "llm":    LLMTuner,
+    "mobo":   MOBOTuner,
 }
 
 
