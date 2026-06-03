@@ -336,9 +336,10 @@ def make_fig11(models: dict, out_dir, do_nmpc=True):
     ax_y, ax_u, ax_d = axes
 
     # --- Controlled Output ---
-    # setpoint first (so it sits behind the curves)
+    # setpoint first (so it sits behind the curves), zero-order hold
     any_r = next(iter(rolls.values()))
-    ax_y.plot(any_r["t"], any_r["ysp"], "k--", label=r"$y_{sp}$", lw=1.6)
+    ax_y.plot(any_r["t"], any_r["ysp"], "k--", drawstyle="steps-post",
+              label=r"$y_{sp}$", lw=1.6)
     for label, r in rolls.items():
         s = PINN_STYLES.get(label, {"color": "tab:blue", "lw": 2, "ls": "-"})
         ax_y.plot(r["t"], r["x"], color=s["color"], lw=s["lw"], ls=s["ls"],
@@ -351,23 +352,23 @@ def make_fig11(models: dict, out_dir, do_nmpc=True):
     ax_y.legend(loc="lower right", fontsize=9)
     ax_y.grid(alpha=0.3)
 
-    # --- Control Signal ---
+    # --- Control Signal (zero-order hold - staircase render) ---
     for label, r in rolls.items():
         c = U_COLOR_PINN.get(label, "purple")
         s = PINN_STYLES.get(label, {"lw": 1.5, "ls": "-"})
         ax_u.plot(r["t"], r["u"], color=c, lw=s["lw"], ls=s["ls"],
-                   label=f"{label} u(t)")
+                   drawstyle="steps-post", label=f"{label} u(t)")
     if nmpc is not None:
         ax_u.plot(nmpc["t"], nmpc["u"], color="indigo", lw=1.3, ls=":",
-                   label="NMPC u(t)")
+                   drawstyle="steps-post", label="NMPC u(t)")
     ax_u.set_ylabel("Control Flow (m³/s)")
     ax_u.set_title("Control Signal")
     ax_u.legend(loc="upper right", fontsize=9)
     ax_u.grid(alpha=0.3)
 
-    # --- Disturbance Profile ---
+    # --- Disturbance Profile (also piecewise-constant) ---
     ax_d.plot(any_r["t"], any_r["d"], "--", color="teal", lw=1.8,
-              label="d(t)")
+              drawstyle="steps-post", label="d(t)")
     ax_d.set_ylabel("Disturbance (m³/s)")
     ax_d.set_xlabel("Time (s)")
     ax_d.set_title("Disturbance Profile")
@@ -399,7 +400,8 @@ def make_fig5(models: dict, out_dir, noise_std=0.0, fig_id="fig05"):
     ax_y, ax_u, ax_d = axes
     any_r = next(iter(rolls.values()))
 
-    ax_y.plot(any_r["t"], any_r["ysp"], "k--", label=r"$y_{sp}$", lw=1.5)
+    ax_y.plot(any_r["t"], any_r["ysp"], "k--", drawstyle="steps-post",
+              label=r"$y_{sp}$", lw=1.5)
     for label, r in rolls.items():
         s = PINN_STYLES.get(label, {"color": "tab:blue", "lw": 1.5, "ls": "-"})
         ax_y.plot(r["t"], r["x"], color=s["color"], lw=s["lw"], ls=s["ls"],
@@ -413,13 +415,14 @@ def make_fig5(models: dict, out_dir, noise_std=0.0, fig_id="fig05"):
         c = U_COLOR_PINN.get(label, "purple")
         s = PINN_STYLES.get(label, {"lw": 1.2, "ls": "-"})
         ax_u.plot(r["t"], r["u"], color=c, lw=s["lw"], ls=s["ls"],
-                   label=f"{label} u(t)")
+                   drawstyle="steps-post", label=f"{label} u(t)")
     ax_u.set_ylabel("Control Flow (m³/s)")
     ax_u.set_title("Control Signal")
     ax_u.legend(loc="best", fontsize=9)
     ax_u.grid(alpha=0.3)
 
-    ax_d.plot(any_r["t"], any_r["d"], "--", color="teal", label="d(t)")
+    ax_d.plot(any_r["t"], any_r["d"], "--", color="teal",
+              drawstyle="steps-post", label="d(t)")
     ax_d.set_ylabel("Disturbance (m³/s)")
     ax_d.set_xlabel("Time (s)")
     ax_d.set_title("Disturbance Profile")
@@ -464,9 +467,9 @@ def make_fig7(models: dict, out_dir):
         ax_y.plot(r["t"], r["x"], styles[f"{A:.1f}"],
                    label=f"A={A:.1f} m²", lw=2)
         ax_u.plot(r["t"], r["u"], styles[f"{A:.1f}"], color="purple",
-                   label=f"A={A:.1f} m²", lw=1.5)
+                   drawstyle="steps-post", label=f"A={A:.1f} m²", lw=1.5)
     ax_y.plot(rolls[1.0]["t"], rolls[1.0]["ysp"], "k--",
-              label=r"$y_{sp}$", lw=1.5)
+              drawstyle="steps-post", label=r"$y_{sp}$", lw=1.5)
     ax_y.set_ylabel("Tank Level (m)")
     ax_y.set_title("Controlled Output")
     ax_y.legend(loc="best")
@@ -476,7 +479,7 @@ def make_fig7(models: dict, out_dir):
     ax_u.legend(loc="best")
     ax_u.grid(alpha=0.3)
     ax_d.plot(rolls[1.0]["t"], rolls[1.0]["d"], "--", color="teal",
-              label="d(t)")
+              drawstyle="steps-post", label="d(t)")
     ax_d.set_ylabel("Disturbance (m³/s)")
     ax_d.set_xlabel("Time (s)")
     ax_d.set_title("Disturbance Profile")
