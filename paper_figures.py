@@ -55,6 +55,7 @@ DT_PLANT = 0.01      # plant integration step (s)
 TS_CTRL = 1.0        # controller sampling time (s)
 U_MIN, U_MAX = 0.0, 1.0
 X_MIN, X_MAX = 0.0, 4.0
+DU_MAX = 0.2          # Kardamaki Sec 4.1.1 - rate constraint per controller step
 
 KARDAMAKI_TABLE4 = {
     "tracking_mean_offset_m":   0.0161,
@@ -128,6 +129,7 @@ class NMPCOracle:
               u_prev: float | None = None) -> float:
         if u_prev is None:
             u_prev = self.u_prev
+        # Warm-start within DU_MAX of u_prev so SLSQP starts feasible
         u0 = np.full(self.N, u_prev)
 
         def cost(u_seq):
@@ -138,9 +140,28 @@ class NMPCOracle:
             return track + effort
 
         bounds = [(U_MIN, U_MAX)] * self.N
+
+        # Rate constraint: |u[k] - u[k-1]| <= DU_MAX (Kardamaki Sec 4.1.1).
+        # SLSQP 'ineq' constraints require fun(x) >= 0.
+        constraints = [
+            {"type": "ineq",
+             "fun": lambda u, up=u_prev: DU_MAX - (u[0] - up)},
+            {"type": "ineq",
+             "fun": lambda u, up=u_prev: DU_MAX - (up - u[0])},
+        ]
+        for k in range(self.N - 1):
+            constraints.append({"type": "ineq",
+                "fun": lambda u, k=k: DU_MAX - (u[k+1] - u[k])})
+            constraints.append({"type": "ineq",
+                "fun": lambda u, k=k: DU_MAX - (u[k] - u[k+1])})
+
         res = minimize(cost, u0, method="SLSQP", bounds=bounds,
-                        options={"maxiter": 30, "ftol": 1e-6})
+                        constraints=constraints,
+                        options={"maxiter": 50, "ftol": 1e-6})
         u_cmd = float(res.x[0])
+        # Safety clip in case SLSQP returns a marginally-infeasible point
+        u_cmd = float(np.clip(u_cmd, u_prev - DU_MAX, u_prev + DU_MAX))
+        u_cmd = float(np.clip(u_cmd, U_MIN, U_MAX))
         self.u_prev = u_cmd
         return u_cmd
 
