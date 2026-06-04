@@ -91,7 +91,12 @@ class CrystNMPCWeights:
     N: int = 10
     Q_CV: float = 1.0       # identity over [CV, L_n]
     Q_Ln: float = 1.0
-    R:    float = 0.0       # zero R matrix
+    # Bloor 2025 §4.3.3 specifies R=0 for crystallization. However, R=0
+    # produces oscillatory T_c in closed-loop NMPC on this stiff problem
+    # (the warning "rterm was not set..." is exactly this). We set R=1e-3
+    # as a minimal rate penalty to stabilize sequential NMPC queries.
+    # Effect on single-shot queries (training data labels) is negligible.
+    R:    float = 1e-3
     dt_hr: float = CrystScenario().dt_hr   # 1.0 hour
 
 
