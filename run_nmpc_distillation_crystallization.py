@@ -40,13 +40,22 @@ from agentic_pcgym.data_gen import (
 from agentic_pcgym.evaluator import evaluate_crystallization
 
 
-# NaN-safer + physics-first defaults (from bench.py CRYST_DEFAULT).
-# These were chosen to avoid the NaN issues that plagued the prior LLM-AutoOpt
-# run on crystallization. We re-use them for the distillation warm-start.
+# Distillation-FRIENDLY defaults for crystallization.
+# Physics weights are deliberately LOW so the L_nmpc supervised signal dominates.
+# Why: crystallization's L_ode is huge (mu moments span 10+ orders of magnitude),
+# so w_ode=250 gave loss = 1.58e5 at ep 1 and NaN'd at ep 72. Dialing physics
+# down lets distillation drive the policy; physics terms still regularize but
+# don't overwhelm. Learning rate is also halved for early-training stability.
 CRYST_DEFAULT_CFG = {
-    "w_ode": 250.0, "w_ic": 1.0, "w_ytrk": 5.0, "w_utrk": 0.1,
-    "w_du": 2.0, "w_u": 50.0, "w_x": 5.0,
-    "lr1": 5e-4, "lr2": 1e-4,
+    "w_ode":  10.0,    # was 250 — physics is now secondary, not dominant
+    "w_ic":   0.5,     # was 1.0
+    "w_ytrk": 2.0,     # was 5.0
+    "w_utrk": 0.05,    # was 0.1
+    "w_du":   1.0,     # was 2.0
+    "w_u":    10.0,    # was 50 — softer bounds
+    "w_x":    1.0,     # was 5.0
+    "lr1":    1e-4,    # was 5e-4 — much lower for stability
+    "lr2":    5e-5,    # was 1e-4
 }
 
 
@@ -81,8 +90,11 @@ def main():
     ap.add_argument("--K1", type=int, default=10000)
     ap.add_argument("--K2", type=int, default=10000)
     ap.add_argument("--bs", type=int, default=64)
-    ap.add_argument("--w-nmpc", type=float, default=200.0,
-                     help="Weight on the L_nmpc behavior-cloning term")
+    ap.add_argument("--w-nmpc", type=float, default=500.0,
+                     help="Weight on the L_nmpc behavior-cloning term. "
+                          "Default 500 (vs 200 for four-tank) because "
+                          "crystallization physics losses are much larger; "
+                          "we need distillation to dominate.")
     ap.add_argument("--output", default="results/nmpc_distill_crystallization/")
     ap.add_argument("--episodes-cache", default=None,
                      help="If set, load pre-sampled episodes (with u_nmpc) from this path")

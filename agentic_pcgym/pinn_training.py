@@ -443,7 +443,11 @@ def train_pinn_crystallization(
             u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": [], "nan_at": ("P1", ep)}
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        # Gradient clipping: prevents the huge crystallization L_ode gradients
+        # from blowing up the weights. max_norm=1.0 is standard for PINN training.
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step()
         hist_p1.append(float(loss.item()))
         if verbose and (ep == 1 or ep % 500 == 0):
             print(f"  P1 ep {ep:5d}: loss={loss.item():.4e}")
@@ -459,7 +463,9 @@ def train_pinn_crystallization(
             u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": ("P2", ep)}
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step()
         hist_p2.append(float(loss.item()))
         if verbose and (ep == 1 or ep % 500 == 0):
             print(f"  P2 ep {ep:5d}: loss={loss.item():.4e}")
