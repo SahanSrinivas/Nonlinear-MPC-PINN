@@ -30,10 +30,14 @@ from .plants.crystallization import (
     CrystScenario)
 from .plants.fourtank import (
     FourTankParams, step as fourtank_step, FourTankScenario)
+from .plants.cstr import (
+    CSTRParams, step as cstr_step, CSTRScenario)
 from .nmpc_crystallization import (
     CrystallizationNMPC, CrystOperatingPoint, CrystBounds)
 from .nmpc_fourtank import (
     FourTankNMPC, FourTankOperatingPoint, FourTankBounds)
+from .nmpc_cstr import (
+    CSTRNMPC, CSTROperatingPoint, CSTRBounds)
 
 
 # ============================================================================
@@ -356,6 +360,98 @@ def evaluate_fourtank(controller_query: Callable, n_reps: int = 50,
              "median_reward_oracle": float(np.median(rewards_oracle)),
              "step_setpoints": step_setpoints,
              "n_setpoint_errors": n_setpoint_errors}
+
+
+# ============================================================================
+# CSTR reward + closed-loop + evaluator
+# ============================================================================
+def normalised_reward_cstr(C_A: float, T_c: float, T_c_prev: float,
+                            CA_sp: float,
+                            b: CSTRBounds | None = None) -> float:
+    """Bloor Eq 13 with Q=identity over [C_A], R=0."""
+    b = b or CSTRBounds()
+    CA_range = b.C_A_max - b.C_A_min
+    e_CA = (C_A - CA_sp) / CA_range
+    return -(e_CA * e_CA)
+
+
+@dataclass
+class CSTREpisodeResult:
+    cumulative_reward: float
+    C_A_trajectory: list
+    T_trajectory: list
+    T_c_trajectory: list
+    n_steps: int
+
+
+def closed_loop_cstr(
+        controller_query: Callable,    # (C_A, T, CA_sp, T_c_prev) -> T_c
+        x0: np.ndarray,
+        CA_sp: float,
+        n_steps: int = None,
+        scen: CSTRScenario | None = None,
+        params: CSTRParams | None = None,
+        ) -> CSTREpisodeResult:
+    scen = scen or CSTRScenario()
+    params = params or CSTRParams()
+    n_steps = n_steps or scen.n_steps
+    x = x0.copy()
+    cumulative_reward = 0.0
+    CA_traj, T_traj, Tc_traj = [], [], []
+    T_c_prev = 300.0   # initial T_c guess
+    for k in range(n_steps):
+        u = controller_query(float(x[0]), float(x[1]),
+                              float(CA_sp), float(T_c_prev))
+        if u is None:
+            u = T_c_prev
+        T_c = float(u)
+        x = cstr_step(x, T_c, scen.dt_min, params)
+        r = normalised_reward_cstr(float(x[0]), T_c, T_c_prev, float(CA_sp))
+        cumulative_reward += r
+        CA_traj.append(float(x[0]))
+        T_traj.append(float(x[1]))
+        Tc_traj.append(T_c)
+        T_c_prev = T_c
+    return CSTREpisodeResult(
+        cumulative_reward=cumulative_reward,
+        C_A_trajectory=CA_traj,
+        T_trajectory=T_traj,
+        T_c_trajectory=Tc_traj,
+        n_steps=n_steps)
+
+
+def evaluate_cstr(controller_query: Callable, n_reps: int = 50,
+                   seed: int = 0, verbose: bool = True) -> dict:
+    """Bloor's standard C_A setpoint-tracking evaluation."""
+    rng = np.random.default_rng(seed)
+    op = CSTROperatingPoint()
+    rewards_pi, rewards_oracle = [], []
+    oracle = CSTRNMPC()
+    def oracle_query(C_A, T, CA_sp, T_c_prev):
+        return oracle.query(np.array([C_A, T]), sp_CA=CA_sp)
+    for rep in range(n_reps):
+        # Per-episode warm-start reset (critical, learned from crystallization)
+        oracle.reset()
+        # Initial state with small randomisation
+        x0 = np.array([op.C_A_0, op.T_0])
+        x0[0] *= rng.uniform(0.95, 1.05)
+        x0[1] *= rng.uniform(0.97, 1.03)
+        # Setpoint within Bloor Fig 3 envelope
+        CA_sp = float(rng.uniform(0.82, 0.91))
+        r_pi = closed_loop_cstr(controller_query, x0, CA_sp)
+        r_or = closed_loop_cstr(oracle_query,        x0, CA_sp)
+        rewards_pi.append(r_pi.cumulative_reward)
+        rewards_oracle.append(r_or.cumulative_reward)
+        if verbose and (rep + 1) % max(1, n_reps // 5) == 0:
+            print(f"  rep {rep+1}/{n_reps}: pi={r_pi.cumulative_reward:.3f}, "
+                  f"oracle={r_or.cumulative_reward:.3f}")
+    return {"rewards_pi": rewards_pi, "rewards_oracle": rewards_oracle,
+             "optimality_gap": optimality_gap(rewards_pi,
+                                                float(np.median(rewards_oracle)),
+                                                n_setpoint_errors=1),
+             "MAD": median_absolute_deviation(rewards_pi),
+             "median_reward_pi":     float(np.median(rewards_pi)),
+             "median_reward_oracle": float(np.median(rewards_oracle))}
 
 
 if __name__ == "__main__":

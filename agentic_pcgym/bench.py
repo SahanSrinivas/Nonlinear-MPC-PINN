@@ -79,6 +79,24 @@ CRYST_HSPACE_DISTILL = {**CRYST_HSPACE,
                           "w_nmpc": (10.0, 2000.0, True)}
 CRYST_DEFAULT_DISTILL = {**CRYST_DEFAULT, "w_nmpc": 200.0}
 
+# CSTR — Case Study 1 (simplest, 2 states, 1 input, linear normalization)
+CSTR_HSPACE = {
+    "w_ode":   (1.0,   1000.0, True),
+    "w_ic":    (0.1,   100.0,  True),
+    "w_ytrk":  (0.1,   100.0,  True),
+    "w_utrk":  (0.01,  10.0,   True),
+    "w_du":    (0.1,   100.0,  True),
+    "w_u":     (1.0,   1000.0, True),
+    "w_x":     (0.1,   100.0,  True),
+    "lr1":     (1e-4,  1e-2,   True),
+    "lr2":     (1e-5,  1e-3,   True),
+}
+CSTR_DEFAULT = {"w_ode": 100.0, "w_ic": 10.0, "w_ytrk": 10.0, "w_utrk": 1.0,
+                 "w_du": 1.0, "w_u": 100.0, "w_x": 10.0,
+                 "lr1": 1e-3, "lr2": 2e-4}
+CSTR_HSPACE_DISTILL = {**CSTR_HSPACE, "w_nmpc": (10.0, 2000.0, True)}
+CSTR_DEFAULT_DISTILL = {**CSTR_DEFAULT, "w_nmpc": 200.0}
+
 
 def _clip(cfg: dict, hspace: dict) -> dict:
     return {n: max(lo, min(hi, float(cfg.get(n, 0.5*(lo+hi)))))

@@ -19,6 +19,8 @@ from .nmpc_crystallization import (
     CrystallizationNMPC, CrystOperatingPoint, CrystBounds)
 from .nmpc_fourtank import (
     FourTankNMPC, FourTankOperatingPoint, FourTankBounds)
+from .nmpc_cstr import (
+    CSTRNMPC, CSTROperatingPoint, CSTRBounds)
 
 
 # ============================================================================
@@ -141,6 +143,61 @@ def sample_fourtank_episodes(N: int, seed: int = 0,
             if u is None:
                 n_fail += 1
                 u_arr[i] = [(b.v_min + b.v_max) / 2] * 2
+            else:
+                u_arr[i] = u
+            if verbose and (i+1) % max(1, N//10) == 0:
+                rate = (i+1) / (time.time() - t0)
+                print(f"  [{i+1:>5}/{N}]  fail={n_fail}  ({rate:.1f}/s)")
+        out["u_nmpc"] = torch.from_numpy(u_arr)
+        if verbose:
+            print(f"  Done. Failures: {n_fail}/{N}")
+    return out
+
+
+# ============================================================================
+# CSTR episodes
+# ============================================================================
+def sample_cstr_episodes(N: int, seed: int = 0,
+                          query_nmpc: bool = True,
+                          verbose: bool = True) -> dict:
+    """Sample N random (C_A, T, CA_sp, T_c_IC) episodes for CSTR training.
+
+    Initial conditions: C_A ~ U(0.7, 0.95), T ~ U(310, 340).
+    Setpoints: CA_sp ~ U(0.80, 0.92) (Bloor Fig 3 envelope).
+    If query_nmpc=True, queries NMPC oracle for u_NMPC = T_c.
+    """
+    rng = np.random.default_rng(seed)
+    b = CSTRBounds()
+    op = CSTROperatingPoint()
+
+    # Initial states (around operating point with some spread)
+    C_A = rng.uniform(0.70, 0.95, N).astype(np.float32)
+    T   = rng.uniform(310.0, 340.0, N).astype(np.float32)
+    # Setpoints matching Bloor Fig 3 envelope (operating range)
+    CA_sp = rng.uniform(0.80, 0.92, N).astype(np.float32)
+    # Initial T_c (around operating point)
+    T_c_ic = rng.uniform(b.T_c_min, b.T_c_max, N).astype(np.float32)
+
+    out = {"C_A_all":  torch.from_numpy(C_A),
+            "T_all":    torch.from_numpy(T),
+            "CA_sp_all": torch.from_numpy(CA_sp),
+            "T_c_ic_all": torch.from_numpy(T_c_ic),
+            "u_nmpc":  None}
+
+    if query_nmpc:
+        if verbose:
+            print(f"Querying CSTR NMPC for {N} episodes...")
+        oracle = CSTRNMPC()
+        u_arr = np.zeros(N, dtype=np.float32)
+        n_fail = 0
+        t0 = time.time()
+        for i in range(N):
+            x_state = np.array([C_A[i], T[i]])
+            oracle.reset(x_state)   # per-episode warm-start
+            u = oracle.query(x_state, sp_CA=CA_sp[i])
+            if u is None:
+                n_fail += 1
+                u_arr[i] = (b.T_c_min + b.T_c_max) / 2
             else:
                 u_arr[i] = u
             if verbose and (i+1) % max(1, N//10) == 0:

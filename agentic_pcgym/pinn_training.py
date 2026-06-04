@@ -29,8 +29,13 @@ from .pinn_crystallization import (
     T_C_LO, T_C_HI)
 from .pinn_fourtank import (
     PINN_FourTank, FourTankPINNHparams, V_LO, V_HI, H_LO, H_HI)
+from .pinn_cstr import (
+    PINN_CSTR, CSTRPINNHparams,
+    T_C_LO as CSTR_TC_LO, T_C_HI as CSTR_TC_HI,
+    C_A_LO, C_A_HI, T_LO as CSTR_T_LO, T_HI as CSTR_T_HI)
 from .plants.crystallization import CrystParams, C_eq, CV_from_moments, Ln_from_moments
 from .plants.fourtank import FourTankParams
+from .plants.cstr import CSTRParams
 
 
 # ============================================================================
@@ -566,4 +571,190 @@ def train_pinn_fourtank(
         hist_p2.append(float(loss.item()))
         if verbose and (ep == 1 or ep % 500 == 0):
             print(f"  P2 ep {ep:5d}: loss={loss.item():.4e}")
+    return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": None}
+
+
+# ============================================================================
+# CSTR composite loss + training (LINEAR-SCALE — physics is stable here!)
+# ============================================================================
+def cstr_ode_residual(
+        net: PINN_CSTR,
+        t_col: torch.Tensor,
+        C_A_ic: torch.Tensor, T_ic: torch.Tensor,
+        CA_sp: torch.Tensor, Tc_ic: torch.Tensor,
+        p: CSTRParams,
+        ) -> torch.Tensor:
+    """Returns CSTR ODE-residual squared, averaged across (B, N_col)."""
+    B = C_A_ic.shape[0]
+    N_col = t_col.shape[0]
+    t_flat = t_col.repeat(B).requires_grad_(True)
+    CA_f = C_A_ic.repeat_interleave(N_col)
+    T_f  = T_ic.repeat_interleave(N_col)
+    sp_f = CA_sp.repeat_interleave(N_col)
+    Tc_f = Tc_ic.repeat_interleave(N_col)
+
+    C_A_p, T_p, T_c_p = net(t_flat, CA_f, T_f, sp_f, Tc_f)
+    # Time derivatives via autograd
+    dCA_dt = grad(C_A_p.sum(), t_flat, create_graph=True, retain_graph=True)[0]
+    dT_dt  = grad(T_p.sum(),   t_flat, create_graph=True, retain_graph=True)[0]
+    # Plant ODE RHS (Eq 14-15)
+    T_safe = torch.clamp(T_p, min=1e-6)
+    rA = p.k0 * torch.exp(-p.EA_over_R / T_safe) * C_A_p
+    rhs_CA = (p.q / p.V) * (p.C_Af - C_A_p) - rA
+    rhs_T  = ((p.q / p.V) * (p.T_f - T_p)
+              + (-p.deltaHr) * rA / (p.rho * p.C_p)
+              + p.UA * (T_c_p - T_p) / (p.rho * p.C_p * p.V))
+    # Normalised residuals (so different scales don't dominate)
+    res_CA = (dCA_dt - rhs_CA) / (C_A_HI - C_A_LO)
+    res_T  = (dT_dt  - rhs_T)  / (CSTR_T_HI - CSTR_T_LO)
+    return (res_CA.pow(2).mean() + res_T.pow(2).mean())
+
+
+def composite_loss_cstr(
+        net: PINN_CSTR,
+        t_wp: torch.Tensor, t_col: torch.Tensor,
+        C_A_ic, T_ic, CA_sp, Tc_ic,
+        w_ode, w_ic, w_ytrk, w_utrk, w_du, w_u, w_x,
+        p: CSTRParams,
+        u_nmpc_batch: torch.Tensor | None = None,
+        w_nmpc: float = 0.0) -> tuple[torch.Tensor, dict]:
+    """Full composite loss for the CSTR PINN."""
+    B = C_A_ic.shape[0]
+    N_WP = t_wp.shape[0]
+    _zero = torch.tensor(0.0, device=C_A_ic.device)
+
+    # 1. ODE residual (only if w_ode > 0)
+    if w_ode > 0:
+        L_ode = cstr_ode_residual(net, t_col, C_A_ic, T_ic, CA_sp, Tc_ic, p)
+    else:
+        L_ode = _zero
+
+    # Multi-waypoint forward (needed for L_ic, L_ytrk, etc.)
+    need_waypoints = any(w > 0 for w in (w_ic, w_ytrk, w_utrk, w_du, w_u, w_x))
+    if need_waypoints:
+        t_flat = t_wp.repeat(B)
+        CA_f = C_A_ic.repeat_interleave(N_WP)
+        T_f  = T_ic.repeat_interleave(N_WP)
+        sp_f = CA_sp.repeat_interleave(N_WP)
+        Tc_f = Tc_ic.repeat_interleave(N_WP)
+        CA_p, T_p, Tc_p = net(t_flat, CA_f, T_f, sp_f, Tc_f)
+        CA_w = CA_p.view(B, N_WP)
+        T_w  = T_p.view(B, N_WP)
+        Tc_w = Tc_p.view(B, N_WP)
+
+        # 2. IC (state at t=0 matches IC)
+        L_ic = (((CA_w[:, 0] - C_A_ic) / (C_A_HI - C_A_LO)).pow(2).mean()
+                + ((T_w[:, 0] - T_ic) / (CSTR_T_HI - CSTR_T_LO)).pow(2).mean())
+
+        # 3. Output tracking (C_A -> CA_sp)
+        L_ytrk = (((CA_w - CA_sp.unsqueeze(1)) / (C_A_HI - C_A_LO))
+                   .pow(2).mean())
+
+        # 4. Input tracking (T_c -> mid-bound)
+        Tc_mid = 0.5 * (CSTR_TC_LO + CSTR_TC_HI)
+        L_utrk = (((Tc_w - Tc_mid) / (CSTR_TC_HI - CSTR_TC_LO))
+                   .pow(2).mean())
+
+        # 5. Move suppression
+        dTc = (Tc_w[:, 1:] - Tc_w[:, :-1]) / (CSTR_TC_HI - CSTR_TC_LO)
+        L_du = (dTc.abs() - 0.1).clamp(min=0.0).pow(2).mean()
+
+        # 6. Input bounds
+        L_u = (F.relu(CSTR_TC_LO - Tc_w).pow(2)
+               + F.relu(Tc_w - CSTR_TC_HI).pow(2)).mean()
+
+        # 7. State bounds (C_A >= 0; T in normal range)
+        L_x = F.relu(-CA_w).pow(2).mean()
+    else:
+        L_ic = L_ytrk = L_utrk = L_du = L_u = L_x = _zero
+
+    # 8. NMPC behavior-cloning (matches PINN's T_c at t=1.0 to oracle u_NMPC)
+    L_nmpc = torch.tensor(0.0, device=C_A_ic.device)
+    if u_nmpc_batch is not None and w_nmpc > 0:
+        t_query = torch.full_like(C_A_ic, 1.0)
+        _, _, Tc_q = net(t_query, C_A_ic, T_ic, CA_sp, Tc_ic)
+        L_nmpc = ((Tc_q - u_nmpc_batch) / (CSTR_TC_HI - CSTR_TC_LO)).pow(2).mean()
+
+    total = (w_ode * L_ode + w_ic * L_ic + w_ytrk * L_ytrk
+              + w_utrk * L_utrk + w_du * L_du + w_u * L_u + w_x * L_x
+              + w_nmpc * L_nmpc)
+    components = {"L_ode": L_ode, "L_ic": L_ic, "L_ytrk": L_ytrk,
+                   "L_utrk": L_utrk, "L_du": L_du, "L_u": L_u, "L_x": L_x,
+                   "L_nmpc": L_nmpc}
+    return total, components
+
+
+def train_pinn_cstr(
+        net: PINN_CSTR,
+        episodes: dict,
+        hp: CSTRPINNHparams,
+        p: CSTRParams = None,
+        verbose: bool = False,
+        seed: int = 0,
+        ) -> dict:
+    """Two-phase Adam training for the CSTR PINN."""
+    torch.manual_seed(seed)
+    p = p or CSTRParams()
+    t_wp, t_col = make_time_grids(T_horizon=hp.T_horizon, Ts=hp.Ts)
+    hist_p1, hist_p2 = [], []
+    keys = ["C_A_all", "T_all", "CA_sp_all", "T_c_ic_all"]
+    arrays = [episodes[k].to(DEVICE) for k in keys]
+    N_total = arrays[0].shape[0]
+
+    # NMPC labels (only if hp.w_nmpc > 0)
+    u_nmpc_tensor = None
+    if getattr(hp, "w_nmpc", 0.0) > 0.0:
+        u_nmpc_arr = episodes.get("u_nmpc")
+        if u_nmpc_arr is not None:
+            u_nmpc_tensor = u_nmpc_arr.to(DEVICE) if isinstance(u_nmpc_arr, torch.Tensor) \
+                            else torch.from_numpy(u_nmpc_arr).to(DEVICE)
+
+    def get_batch(ep_idx):
+        s = (ep_idx * hp.bs) % N_total
+        e = s + hp.bs
+        if e <= N_total:
+            arr_batch = [a[s:e] for a in arrays]
+            nmpc_batch = u_nmpc_tensor[s:e] if u_nmpc_tensor is not None else None
+        else:
+            arr_batch = [torch.cat([a[s:], a[:e - N_total]]) for a in arrays]
+            nmpc_batch = (torch.cat([u_nmpc_tensor[s:], u_nmpc_tensor[:e - N_total]])
+                          if u_nmpc_tensor is not None else None)
+        return arr_batch, nmpc_batch
+
+    # Phase 1: no bound terms (w_du, w_u, w_x = 0)
+    opt = torch.optim.Adam(net.parameters(), lr=hp.lr1)
+    for ep in range(1, hp.K1 + 1):
+        bat, nmpc_bat = get_batch(ep - 1)
+        loss, _ = composite_loss_cstr(
+            net, t_wp, t_col, *bat,
+            hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_utrk,
+            0.0, 0.0, 0.0, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
+        if torch.isnan(loss):
+            return {"hist_p1": hist_p1, "hist_p2": [], "nan_at": ("P1", ep)}
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step()
+        hist_p1.append(float(loss.item()))
+        if verbose and (ep == 1 or ep % 500 == 0):
+            print(f"  P1 ep {ep:5d}: loss={loss.item():.4e}")
+
+    # Phase 2: full loss
+    opt = torch.optim.Adam(net.parameters(), lr=hp.lr2)
+    for ep in range(1, hp.K2 + 1):
+        bat, nmpc_bat = get_batch(ep - 1)
+        loss, _ = composite_loss_cstr(
+            net, t_wp, t_col, *bat,
+            hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_utrk,
+            hp.w_du, hp.w_u, hp.w_x, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
+        if torch.isnan(loss):
+            return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": ("P2", ep)}
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step()
+        hist_p2.append(float(loss.item()))
+        if verbose and (ep == 1 or ep % 500 == 0):
+            print(f"  P2 ep {ep:5d}: loss={loss.item():.4e}")
+
     return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": None}
