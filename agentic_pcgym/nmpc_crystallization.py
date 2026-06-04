@@ -187,17 +187,35 @@ class CrystallizationNMPC:
             return tvp_t
         mpc.set_tvp_fun(tvp_fun)
         mpc.setup()
+        # Call set_initial_guess ONCE at construction (matches PC-Gym).
+        # do-mpc auto-warm-starts from the previous solution between sequential
+        # make_step() calls. Calling set_initial_guess every query (our prior
+        # bug) RESETS the warm-start, causing IPOPT to fail ~50% of the time
+        # on stiff closed-loop crystallization.
+        try:
+            mpc.set_initial_guess()
+        except Exception:
+            pass
         self.mpc = mpc
         self.model = model
 
+    def reset(self):
+        """Reset the warm-start. Call ONCE per episode (between reps), NOT
+        between sequential steps within an episode. Within an episode,
+        do-mpc auto-warm-starts from the previous solution."""
+        try:
+            self.mpc.set_initial_guess()
+        except Exception:
+            pass
+
     def query(self, x: np.ndarray,
               sp_CV: float, sp_Ln: float) -> float | None:
-        """Solve one FHOCP. Returns u_NMPC = T_c, or None on failure."""
+        """Solve one FHOCP. Returns u_NMPC = T_c, or None on failure.
+        Uses do-mpc's automatic warm-start from previous solve."""
         self._sp = (float(sp_CV), float(sp_Ln))
         x_arr = np.array(x, dtype=float).reshape(5, 1)
         self.mpc.x0 = x_arr
         try:
-            self.mpc.set_initial_guess()
             u = self.mpc.make_step(x_arr)
             return float(np.clip(u[0, 0], self.b.T_c_min, self.b.T_c_max))
         except Exception:

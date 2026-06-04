@@ -266,6 +266,11 @@ def evaluate_crystallization(
     oracle_query = lambda *a, **kw: oracle.query(np.array(a[:5]),
                                                     sp_CV=a[5], sp_Ln=a[6])
     for rep in range(n_reps):
+        # CRITICAL: reset oracle warm-start between episodes. Within an
+        # episode, sequential make_step() calls auto-warm-start from the
+        # previous solution (do-mpc default behavior). Between episodes,
+        # the previous solution is stale, so we reset.
+        oracle.reset()
         x0 = np.array([op.mu_0_0, op.mu_1_0, op.mu_2_0, op.mu_3_0, op.c_0])
         # Add small randomisation
         x0 = x0 * rng.uniform(0.9, 1.1, 5).astype(np.float64)
