@@ -12,14 +12,41 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
+import sys
+import warnings
 from pathlib import Path
 
 import torch
 
+# Suppress Python-level warnings from scipy/numpy/casadi-Python
+warnings.filterwarnings("ignore")
+
 from agentic_pcgym.pinn_crystallization import (
     PINN_Crystallization, DEVICE)
 from agentic_pcgym.evaluator import evaluate_crystallization
+
+
+@contextlib.contextmanager
+def suppress_fortran_stderr():
+    """Silence Fortran/C++ stderr (LSODA warnings, CasADi WARNING lines).
+
+    These come from compiled code and bypass Python's warnings system. We
+    redirect file descriptor 2 (OS-level stderr) to /dev/null inside the
+    context, then restore it after.
+    """
+    # Save original stderr fd
+    old_stderr_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        os.dup2(old_stderr_fd, 2)
+        os.close(devnull_fd)
+        os.close(old_stderr_fd)
 
 
 def pinn_query_factory(net, t_c_min=25.0, t_c_max=50.0):
@@ -53,8 +80,11 @@ def main():
     print(f"=== Evaluating on {a.n_reps} closed-loop reps "
           f"(Tc clipped to [{a.clip_min}, {a.clip_max}] °C) ===")
     q = pinn_query_factory(net, a.clip_min, a.clip_max)
-    metrics = evaluate_crystallization(q, n_reps=a.n_reps, seed=a.seed,
-                                          verbose=True)
+    # Suppress LSODA + CasADi noise during eval (they come from C/Fortran).
+    # Python errors still propagate normally.
+    with suppress_fortran_stderr():
+        metrics = evaluate_crystallization(q, n_reps=a.n_reps, seed=a.seed,
+                                              verbose=True)
     print("\n=== RESULT ===")
     print(f"  median_reward_pi:     {metrics['median_reward_pi']:>10.4f}")
     print(f"  median_reward_oracle: {metrics['median_reward_oracle']:>10.4f}")
