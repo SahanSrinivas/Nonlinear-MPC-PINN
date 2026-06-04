@@ -164,8 +164,16 @@ def select_strategy(diag: Diagnosis, case_playbook: dict) -> Strategy:
 # Tuning agent (apply multipliers to current best cfg, clip to bounds)
 # ---------------------------------------------------------------------------
 def apply_strategy(current_cfg: dict, strat: Strategy, hspace: dict,
-                    rng: np.random.Generator | None = None) -> dict:
-    """Apply playbook multipliers; clip to HSPACE."""
+                    rng: np.random.Generator | None = None,
+                    scalar_jitter: float = 0.20) -> dict:
+    """Apply playbook multipliers; clip to HSPACE.
+
+    scalar_jitter: for scalar multipliers (e.g., 2.0), sample uniformly in
+    [m * (1 - jitter), m * (1 + jitter)]. Default 0.20 = ±20%. Prevents
+    LEAN from proposing the IDENTICAL cfg on consecutive iters when the
+    diagnosis doesn't change (which would waste compute on duplicate trials).
+    List/tuple multipliers [lo, hi] are unchanged (already-jittered ranges).
+    """
     rng = rng or np.random.default_rng()
     new_cfg = dict(current_cfg)
     for name, m in strat.param_changes.items():
@@ -174,7 +182,10 @@ def apply_strategy(current_cfg: dict, strat: Strategy, hspace: dict,
         if isinstance(m, (list, tuple)) and len(m) == 2:
             mult = float(rng.uniform(m[0], m[1]))
         else:
-            mult = float(m)
+            m_val = float(m)
+            lo = m_val * (1.0 - scalar_jitter)
+            hi = m_val * (1.0 + scalar_jitter)
+            mult = float(rng.uniform(lo, hi))
         new_cfg[name] = new_cfg[name] * mult
     return _clip(new_cfg, hspace)
 
@@ -216,6 +227,9 @@ class LeanTunerPCGym:
 
         self.history: list = []
         self._warmed = False
+        self._best_score_at_last_ask = float("inf")
+        self._stagnation_count = 0       # iters since best last improved
+        self._stagnation_threshold = 2   # force explore after this many stale iters
 
     # -- helpers --
     def _best_so_far(self) -> dict | None:
@@ -257,6 +271,13 @@ class LeanTunerPCGym:
             }
             return new_cfg
 
+        # Track stagnation: did the best improve since last ask?
+        if best["score"] < self._best_score_at_last_ask - 1e-6:
+            self._stagnation_count = 0
+            self._best_score_at_last_ask = best["score"]
+        else:
+            self._stagnation_count += 1
+
         # Normal path: diagnose the best, look up strategy, apply
         metrics = {
             "optimality_gap": best.get("optimality_gap"),
@@ -264,15 +285,32 @@ class LeanTunerPCGym:
         }
         diag = diagnose(metrics, self.reference,
                           nan=(self._latest_nan() and best is None))
-        strat = select_strategy(diag, self.case_playbook)
+
+        # Stagnation override: force exploratory move if best hasn't improved
+        # in too many iters. Prevents the deterministic playbook from proposing
+        # the same cfg over and over.
+        forced_explore = self._stagnation_count >= self._stagnation_threshold
+        if forced_explore:
+            explore_diag = Diagnosis("all_in_band", "mild",
+                                            diag.gap_ratio, diag.mad_ratio)
+            strat = select_strategy(explore_diag, self.case_playbook)
+            self._stagnation_count = 0   # reset after firing explore
+            diag_for_log = explore_diag
+            rationale_prefix = f"[stagnation-explore] "
+        else:
+            strat = select_strategy(diag, self.case_playbook)
+            diag_for_log = diag
+            rationale_prefix = ""
+
         new_cfg = apply_strategy(best["cfg"], strat, self.hspace,
                                      rng=self.rng)
         new_cfg["__lean_diagnosis__"] = {
-            "failure_mode": diag.failure_mode,
-            "severity": diag.severity,
+            "failure_mode": diag_for_log.failure_mode,
+            "severity": diag_for_log.severity,
             "gap_ratio": float(diag.gap_ratio) if np.isfinite(diag.gap_ratio) else None,
             "mad_ratio": float(diag.mad_ratio) if np.isfinite(diag.mad_ratio) else None,
-            "rationale": strat.rationale,
+            "rationale": rationale_prefix + strat.rationale,
+            "stagnation_count": int(self._stagnation_count),
         }
         return new_cfg
 
