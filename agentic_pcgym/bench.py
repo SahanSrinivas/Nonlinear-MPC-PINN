@@ -63,6 +63,10 @@ FT_DEFAULT = {"w_ode": 342.94, "w_ic": 0.30, "w_ytrk": 4.71, "w_xtrk": 0.13,
                "w_utrk": 0.04, "w_du": 1.44, "w_u": 19.25,
                "lr1": 1.67e-3, "lr2": 2.97e-4}
 
+# Optional NMPC-distillation hparam: only active if episodes contain u_nmpc.
+# bench.py does not enable this by default (sample_fourtank_episodes uses
+# query_nmpc=False). Use run_nmpc_distillation_fourtank.py to opt in.
+
 
 def _clip(cfg: dict, hspace: dict) -> dict:
     return {n: max(lo, min(hi, float(cfg.get(n, 0.5*(lo+hi)))))

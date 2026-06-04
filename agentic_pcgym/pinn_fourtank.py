@@ -99,6 +99,11 @@ class FourTankPINNHparams:
     w_utrk:  float = 1.0     # v_1, v_2 tracking
     w_du:    float = 1.0     # move suppression
     w_u:     float = 100.0   # input bounds
+    # NMPC behavior-cloning weight: matches PINN(t=1.0, x_IC, sp, u_prev) to
+    # NMPC oracle action u_NMPC(x_IC, sp). Active only when episodes contain
+    # "u_nmpc" tensor (i.e., when sampled with query_nmpc=True). Default 0
+    # preserves backward compatibility for physics-only training.
+    w_nmpc:  float = 0.0
     # Optimizer
     lr1:     float = 1e-3
     lr2:     float = 2e-4

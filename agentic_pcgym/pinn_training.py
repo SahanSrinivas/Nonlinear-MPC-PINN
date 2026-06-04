@@ -276,7 +276,9 @@ def composite_loss_fourtank(
         t_wp: torch.Tensor, t_col: torch.Tensor,
         h1_ic, h2_ic, h3_ic, h4_ic, h1_sp, h2_sp, v1_ic, v2_ic,
         w_ode, w_ic, w_ytrk, w_xtrk, w_utrk, w_du, w_u,
-        p: FourTankParams) -> tuple[torch.Tensor, dict]:
+        p: FourTankParams,
+        u_nmpc_batch: torch.Tensor | None = None,
+        w_nmpc: float = 0.0) -> tuple[torch.Tensor, dict]:
     B = h1_ic.shape[0]
     N_WP = t_wp.shape[0]
 
@@ -327,12 +329,25 @@ def composite_loss_fourtank(
           + F.relu(-h1_w).pow(2).mean() + F.relu(-h2_w).pow(2).mean() \
           + F.relu(-h3_w).pow(2).mean() + F.relu(-h4_w).pow(2).mean()
 
+    # 8. NMPC behavior-cloning loss (only if u_nmpc was provided)
+    # Match the PINN's action at t=1.0 (the same query the controller uses)
+    # to the NMPC oracle's first-step action. Normalised by action range.
+    L_nmpc = torch.tensor(0.0, device=h1_ic.device)
+    if u_nmpc_batch is not None and w_nmpc > 0.0:
+        t_query = torch.full_like(h1_ic, 1.0)
+        _, _, _, _, v1_q, v2_q = net(
+            t_query, h1_ic, h2_ic, h3_ic, h4_ic,
+            h1_sp, h2_sp, v1_ic, v2_ic)
+        L_nmpc = (((v1_q - u_nmpc_batch[:, 0]) / (V_HI - V_LO)).pow(2).mean()
+                  + ((v2_q - u_nmpc_batch[:, 1]) / (V_HI - V_LO)).pow(2).mean())
+
     total = (w_ode * L_ode + w_ic * L_ic + w_ytrk * L_ytrk
               + w_xtrk * L_xtrk + w_utrk * L_utrk
-              + w_du * L_du + w_u * L_u)
+              + w_du * L_du + w_u * L_u
+              + w_nmpc * L_nmpc)
     components = {"L_ode": L_ode, "L_ic": L_ic, "L_ytrk": L_ytrk,
                    "L_xtrk": L_xtrk, "L_utrk": L_utrk,
-                   "L_du": L_du, "L_u": L_u}
+                   "L_du": L_du, "L_u": L_u, "L_nmpc": L_nmpc}
     return total, components
 
 
@@ -434,6 +449,15 @@ def train_pinn_fourtank(
     arrays = [episodes[k].to(DEVICE) for k in keys]
     N_total = arrays[0].shape[0]
 
+    # NMPC-distillation labels (only used if hp.w_nmpc > 0 AND episodes has u_nmpc).
+    # Shape: (N_total, 2) for four-tank.
+    u_nmpc_tensor = None
+    if getattr(hp, "w_nmpc", 0.0) > 0.0:
+        u_nmpc_arr = episodes.get("u_nmpc")
+        if u_nmpc_arr is not None:
+            u_nmpc_tensor = u_nmpc_arr.to(DEVICE) if isinstance(u_nmpc_arr, torch.Tensor) \
+                            else torch.from_numpy(u_nmpc_arr).to(DEVICE)
+
     # Importance weights for hard episodes (large |h - sp|)
     use_importance = getattr(hp, "importance_alpha", 0.0) > 0.0
     if use_importance:
@@ -446,23 +470,32 @@ def train_pinn_fourtank(
         torch.manual_seed(seed + 1)
 
     def get_batch(ep_idx):
+        """Returns (arrays_batch, u_nmpc_batch_or_None)."""
         if use_importance:
             idx = torch.multinomial(weights, hp.bs, replacement=True)
             idx = idx.to(arrays[0].device)
-            return [a[idx] for a in arrays]
+            arr_batch = [a[idx] for a in arrays]
+            nmpc_batch = u_nmpc_tensor[idx] if u_nmpc_tensor is not None else None
+            return arr_batch, nmpc_batch
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
         if e <= N_total:
-            return [a[s:e] for a in arrays]
-        return [torch.cat([a[s:], a[:e - N_total]]) for a in arrays]
+            arr_batch = [a[s:e] for a in arrays]
+            nmpc_batch = u_nmpc_tensor[s:e] if u_nmpc_tensor is not None else None
+        else:
+            arr_batch = [torch.cat([a[s:], a[:e - N_total]]) for a in arrays]
+            nmpc_batch = (torch.cat([u_nmpc_tensor[s:], u_nmpc_tensor[:e - N_total]])
+                          if u_nmpc_tensor is not None else None)
+        return arr_batch, nmpc_batch
 
     opt = torch.optim.Adam(net.parameters(), lr=hp.lr1)
     for ep in range(1, hp.K1 + 1):
-        bat = get_batch(ep - 1)
+        bat, nmpc_bat = get_batch(ep - 1)
         loss, _ = composite_loss_fourtank(
             net, t_wp, t_col, *bat,
             hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_xtrk, hp.w_utrk,
-            0.0, 0.0, p)
+            0.0, 0.0, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": [], "nan_at": ("P1", ep)}
         opt.zero_grad(); loss.backward(); opt.step()
@@ -472,11 +505,12 @@ def train_pinn_fourtank(
 
     opt = torch.optim.Adam(net.parameters(), lr=hp.lr2)
     for ep in range(1, hp.K2 + 1):
-        bat = get_batch(ep - 1)
+        bat, nmpc_bat = get_batch(ep - 1)
         loss, _ = composite_loss_fourtank(
             net, t_wp, t_col, *bat,
             hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_xtrk, hp.w_utrk,
-            hp.w_du, hp.w_u, p)
+            hp.w_du, hp.w_u, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": ("P2", ep)}
         opt.zero_grad(); loss.backward(); opt.step()
