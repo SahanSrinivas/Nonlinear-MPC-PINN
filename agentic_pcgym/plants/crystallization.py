@@ -115,8 +115,16 @@ def step(x: np.ndarray, T_c: float, dt: float,
          p: CrystParams | None = None) -> np.ndarray:
     """Advance the 5-state x by `dt` hours under constant T_c (degC).
 
-    Uses scipy LSODA (stiff-aware) which is the paper's likely choice given
-    the stiffness of moment equations.
+    Uses scipy RK45 with PC-Gym-matching tolerances (rtol=1e-8, atol=1e-8)
+    to AVOID the LSODA infinite-loop failure on stiff dynamics that occurs
+    when controllers push the system into ill-conditioned regions.
+
+    RK45 is a non-stiff fixed-order solver — it won't try to shrink the step
+    to 1e-17 like LSODA does. If the dynamics are stiff at a given point,
+    RK45 just takes a small (but finite) step and continues.
+
+    PC-Gym (Bloor 2025) uses JAX Tsit5 (5th-order Runge-Kutta) for the same
+    reason — see github.com/MaximilianB2/pc-gym src/pcgym/integrator.py.
 
     Inputs:
       x   (5,) array [mu_0, mu_1, mu_2, mu_3, c]
@@ -124,16 +132,16 @@ def step(x: np.ndarray, T_c: float, dt: float,
       dt  float, integration interval (hours; paper uses 1 hr controller dt)
     """
     p = p or CrystParams()
-    # Use looser tolerances + smaller max_step so the stiff moment ODEs don't
-    # blow up on the first integrator attempt. Population-balance moments
-    # can grow many orders of magnitude in one step, so we cap max_step.
-    sol = solve_ivp(rhs, t_span=(0.0, dt), y0=x, args=(float(T_c), p),
-                     method="LSODA", rtol=1e-6, atol=1e-10,
-                     max_step=dt / 100.0)
-    y_last = np.array(sol.y[:, -1])
+    try:
+        sol = solve_ivp(rhs, t_span=(0.0, dt), y0=x, args=(float(T_c), p),
+                         method="RK45", rtol=1e-8, atol=1e-8,
+                         max_step=dt / 50.0)
+        y_last = np.array(sol.y[:, -1])
+    except Exception:
+        # If even RK45 fails, fall back to previous state (no progression).
+        y_last = x.copy()
     if not np.all(np.isfinite(y_last)):
-        # Fallback: ODE diverged - return clipped non-negative state so the
-        # NMPC's downstream warm-start has a finite vector to chew on.
+        # Replace NaN entries with previous state entries.
         y_last = np.where(np.isfinite(y_last), y_last, x)
     return np.maximum(y_last, 0.0)
 

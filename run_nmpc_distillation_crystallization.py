@@ -68,7 +68,12 @@ CRYST_DEFAULT_CFG = {
 }
 
 
-def _pinn_query_factory(net):
+def _pinn_query_factory(net, t_c_min: float = 25.0, t_c_max: float = 50.0):
+    """Clip Tc output to [25, 50] °C to avoid LSODA NaN on extreme values.
+    Without clipping, the network can output Tc < 0 or > 100, causing the
+    plant integrator to crash. With clipping, the output is always
+    physically meaningful — at worst we lose some policy fidelity.
+    """
     @torch.no_grad()
     def pinn_query(mu0, mu1, mu2, mu3, c, cv_sp, ln_sp):
         z = lambda v: torch.tensor([float(v)], device=DEVICE)
@@ -76,7 +81,7 @@ def _pinn_query_factory(net):
         _, _, _, _, _, Tc = net(
             z(1.0), z(mu0), z(mu1), z(mu2), z(mu3),
             z(c), z(cv_sp), z(ln_sp), Tc_ic)
-        return float(Tc.item())
+        return float(max(t_c_min, min(t_c_max, Tc.item())))
     return pinn_query
 
 
