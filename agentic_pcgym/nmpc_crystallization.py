@@ -199,22 +199,37 @@ class CrystallizationNMPC:
         self.mpc = mpc
         self.model = model
 
-    def reset(self):
-        """Reset the warm-start. Call ONCE per episode (between reps), NOT
-        between sequential steps within an episode. Within an episode,
-        do-mpc auto-warm-starts from the previous solution."""
+    def reset(self, x0: np.ndarray | None = None):
+        """Reset the warm-start. Call ONCE per episode (between reps).
+        If x0 is given, sets the initial state BEFORE re-initializing the
+        guess (so the warm-start matches the new episode's starting state).
+        """
         try:
+            if x0 is not None:
+                self.mpc.x0 = np.array(x0, dtype=float).reshape(5, 1)
             self.mpc.set_initial_guess()
+            self._first_call = True
         except Exception:
             pass
 
     def query(self, x: np.ndarray,
               sp_CV: float, sp_Ln: float) -> float | None:
         """Solve one FHOCP. Returns u_NMPC = T_c, or None on failure.
-        Uses do-mpc's automatic warm-start from previous solve."""
+        Uses do-mpc's automatic warm-start from previous solve.
+        On the FIRST call of an episode (detected via _first_call flag set
+        by reset()), the warm-start is the one set in reset(). On subsequent
+        calls, do-mpc auto-warm-starts from the previous solution."""
         self._sp = (float(sp_CV), float(sp_Ln))
         x_arr = np.array(x, dtype=float).reshape(5, 1)
         self.mpc.x0 = x_arr
+        # On the first call of a new episode, re-set initial guess based on
+        # the actual new x0 (which is now this episode's initial state).
+        if getattr(self, "_first_call", False):
+            try:
+                self.mpc.set_initial_guess()
+            except Exception:
+                pass
+            self._first_call = False
         try:
             u = self.mpc.make_step(x_arr)
             return float(np.clip(u[0, 0], self.b.T_c_min, self.b.T_c_max))
