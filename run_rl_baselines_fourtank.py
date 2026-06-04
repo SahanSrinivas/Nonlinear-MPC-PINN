@@ -62,12 +62,19 @@ class FourTankEnv(gym.Env):
     """
     metadata = {"render_modes": []}
 
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: int | None = None,
+                 reward_scale: float = 1.0):
+        """reward_scale: multiplies the per-step reward during training.
+        Default 1.0 (raw Bloor Eq 13). For PPO/DDPG we use 100.0 because
+        the raw reward magnitude (~-0.001/step) starves their value/Q
+        functions of gradient signal; SAC tolerates it via auto-α tuning.
+        """
         super().__init__()
         self.op = FourTankOperatingPoint()
         self.bounds = FourTankBounds()
         self.scen = FourTankScenario()
         self.params = FourTankParams()
+        self.reward_scale = float(reward_scale)
 
         v_lo = float(self.bounds.v_min)
         v_hi = float(self.bounds.v_max)
@@ -125,6 +132,7 @@ class FourTankEnv(gym.Env):
             self.x[0], self.x[1], u[0], u[1],
             self.v_prev[0], self.v_prev[1],
             self.h1_sp, self.h2_sp, self.bounds)
+        r = float(r) * self.reward_scale
         self.v_prev = (float(u[0]), float(u[1]))
         self.step_count += 1
         terminated = False
@@ -161,9 +169,14 @@ def make_model(algo_name: str, env: gym.Env, seed: int = 0):
                      learning_rate=1e-3, buffer_size=100_000,
                      batch_size=256, gamma=0.99, tau=0.005)
     if algo_name == "PPO":
+        # ent_coef=0.01 adds a small entropy bonus (SB3 default is 0.0, which
+        # causes deterministic policy collapse on smooth-reward tasks like ours).
+        # device='cpu' because PPO with MLP policy is faster on CPU than GPU
+        # (SB3 warns about this; matches Bloor's setup).
         return PPO("MlpPolicy", env, verbose=0, seed=seed,
                     learning_rate=3e-4, n_steps=2048, batch_size=64,
-                    n_epochs=10, gamma=0.99, gae_lambda=0.95)
+                    n_epochs=10, gamma=0.99, gae_lambda=0.95,
+                    ent_coef=0.01, device="cpu")
     raise ValueError(f"Unknown algo: {algo_name}")
 
 
@@ -171,8 +184,13 @@ def train_and_eval(algo_name: str, total_timesteps: int, n_eval_reps: int,
                     out_dir: str, seed: int = 0) -> dict:
     print(f"\n=== Training {algo_name} on four-tank "
           f"(timesteps={total_timesteps:,}) ===")
-    env = FourTankEnv(seed=seed)
+    # Reward scaling: SAC tolerates raw rewards (auto-α tuning); PPO/DDPG
+    # need 100x scaling to give their value/Q functions enough gradient signal.
+    # Doesn't affect opt_gap (computed externally via evaluate_fourtank).
+    reward_scale = 100.0 if algo_name in ("PPO", "DDPG") else 1.0
+    env = FourTankEnv(seed=seed, reward_scale=reward_scale)
     env.reset(seed=seed)
+    print(f"  reward_scale = {reward_scale}")
     model = make_model(algo_name, env, seed=seed)
 
     t0 = time.time()
