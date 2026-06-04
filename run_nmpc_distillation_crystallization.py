@@ -40,22 +40,26 @@ from agentic_pcgym.data_gen import (
 from agentic_pcgym.evaluator import evaluate_crystallization
 
 
-# Distillation-FRIENDLY defaults for crystallization.
-# Physics weights are deliberately LOW so the L_nmpc supervised signal dominates.
-# Why: crystallization's L_ode is huge (mu moments span 10+ orders of magnitude),
-# so w_ode=250 gave loss = 1.58e5 at ep 1 and NaN'd at ep 72. Dialing physics
-# down lets distillation drive the policy; physics terms still regularize but
-# don't overwhelm. Learning rate is also halved for early-training stability.
+# PURE-DISTILLATION (behavior-cloning) defaults for crystallization.
+# All physics weights = 0 because crystallization's PINN has a log_denorm
+# output layer (10^x) that produces NaN in the ODE residual at any small
+# weight update. Even gradient clipping doesn't help — the NaN originates
+# inside the forward pass, not from gradient magnitude.
+#
+# This is pure behavior cloning from NMPC: the PINN learns to mimic NMPC's
+# action at t=1.0, with no physics regularization. Trade-off: we lose physics
+# consistency guarantees, but gain numerical stability AND a clean paper
+# ablation showing the L_nmpc term alone suffices on this benchmark.
 CRYST_DEFAULT_CFG = {
-    "w_ode":  10.0,    # was 250 — physics is now secondary, not dominant
-    "w_ic":   0.5,     # was 1.0
-    "w_ytrk": 2.0,     # was 5.0
-    "w_utrk": 0.05,    # was 0.1
-    "w_du":   1.0,     # was 2.0
-    "w_u":    10.0,    # was 50 — softer bounds
-    "w_x":    1.0,     # was 5.0
-    "lr1":    1e-4,    # was 5e-4 — much lower for stability
-    "lr2":    5e-5,    # was 1e-4
+    "w_ode":   0.0,     # OFF — too unstable for crystallization
+    "w_ic":    0.0,     # OFF
+    "w_ytrk":  0.0,     # OFF (NMPC label encodes tracking implicitly)
+    "w_utrk":  0.0,     # OFF
+    "w_du":    0.0,     # OFF
+    "w_u":     0.0,     # OFF
+    "w_x":     0.0,     # OFF
+    "lr1":     1e-4,
+    "lr2":     5e-5,
 }
 
 

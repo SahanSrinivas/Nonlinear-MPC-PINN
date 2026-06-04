@@ -211,60 +211,67 @@ def composite_loss_crystallization(
     """
     B = mu0_ic.shape[0]
     N_WP = t_wp.shape[0]
+    _zero = torch.tensor(0.0, device=mu0_ic.device)
 
-    # ---- 1. ODE residual ----
-    L_ode = crystallization_ode_residual(
-        net, t_col, mu0_ic, mu1_ic, mu2_ic, mu3_ic, c_ic,
-        cv_sp, ln_sp, Tc_ic, p)
+    # ---- 1. ODE residual (skip if w_ode=0 to avoid NaN from log_denorm chain) ----
+    if w_ode > 0.0:
+        L_ode = crystallization_ode_residual(
+            net, t_col, mu0_ic, mu1_ic, mu2_ic, mu3_ic, c_ic,
+            cv_sp, ln_sp, Tc_ic, p)
+    else:
+        L_ode = _zero
 
-    # ---- 2-8. tracking, IC, bounds (evaluated at tracking points) ----
-    t_flat = t_wp.repeat(B)
-    mu0_f = mu0_ic.repeat_interleave(N_WP)
-    mu1_f = mu1_ic.repeat_interleave(N_WP)
-    mu2_f = mu2_ic.repeat_interleave(N_WP)
-    mu3_f = mu3_ic.repeat_interleave(N_WP)
-    c_f   = c_ic.repeat_interleave(N_WP)
-    cv_f  = cv_sp.repeat_interleave(N_WP)
-    ln_f  = ln_sp.repeat_interleave(N_WP)
-    Tc_f  = Tc_ic.repeat_interleave(N_WP)
-    mu0_p, mu1_p, mu2_p, mu3_p, c_p, Tc_p = net(
-        t_flat, mu0_f, mu1_f, mu2_f, mu3_f, c_f, cv_f, ln_f, Tc_f)
-    mu0_w = mu0_p.view(B, N_WP); mu1_w = mu1_p.view(B, N_WP)
-    mu2_w = mu2_p.view(B, N_WP); mu3_w = mu3_p.view(B, N_WP)
-    c_w   = c_p.view(B, N_WP);    Tc_w = Tc_p.view(B, N_WP)
+    # ---- 2-8. tracking/IC/bounds (skip multi-waypoint forward if all zero) ----
+    need_waypoints = any(w > 0.0 for w in
+                          (w_ic, w_ytrk, w_utrk, w_du, w_u, w_x))
+    if need_waypoints:
+        t_flat = t_wp.repeat(B)
+        mu0_f = mu0_ic.repeat_interleave(N_WP)
+        mu1_f = mu1_ic.repeat_interleave(N_WP)
+        mu2_f = mu2_ic.repeat_interleave(N_WP)
+        mu3_f = mu3_ic.repeat_interleave(N_WP)
+        c_f   = c_ic.repeat_interleave(N_WP)
+        cv_f  = cv_sp.repeat_interleave(N_WP)
+        ln_f  = ln_sp.repeat_interleave(N_WP)
+        Tc_f  = Tc_ic.repeat_interleave(N_WP)
+        mu0_p, mu1_p, mu2_p, mu3_p, c_p, Tc_p = net(
+            t_flat, mu0_f, mu1_f, mu2_f, mu3_f, c_f, cv_f, ln_f, Tc_f)
+        mu0_w = mu0_p.view(B, N_WP); mu1_w = mu1_p.view(B, N_WP)
+        mu2_w = mu2_p.view(B, N_WP); mu3_w = mu3_p.view(B, N_WP)
+        c_w   = c_p.view(B, N_WP);    Tc_w = Tc_p.view(B, N_WP)
+        # CV and L_n at each tracking point (paper Eqs 29, repo Ln=mu1/mu0)
+        CV_w = torch.sqrt(torch.clamp(mu2_w * mu0_w / (mu1_w*mu1_w + 1e-30) - 1.0,
+                                         min=0.0))
+        Ln_w = mu1_w / (mu0_w + 1e-30)
 
-    # CV and L_n at each tracking point (paper Eqs 29, repo Ln=mu1/mu0)
-    CV_w = torch.sqrt(torch.clamp(mu2_w * mu0_w / (mu1_w*mu1_w + 1e-30) - 1.0,
-                                     min=0.0))
-    Ln_w = mu1_w / (mu0_w + 1e-30)
+        # ---- 2. IC: state at t=0 matches IC ----
+        L_ic = ((mu0_w[:, 0] - mu0_ic) / (mu0_ic.abs() + 1.0)).pow(2).mean()
+        L_ic = L_ic + ((mu1_w[:, 0] - mu1_ic) / (mu1_ic.abs() + 1.0)).pow(2).mean()
+        L_ic = L_ic + ((mu2_w[:, 0] - mu2_ic) / (mu2_ic.abs() + 1.0)).pow(2).mean()
+        L_ic = L_ic + ((mu3_w[:, 0] - mu3_ic) / (mu3_ic.abs() + 1.0)).pow(2).mean()
+        L_ic = L_ic + (c_w[:, 0] - c_ic).pow(2).mean()
 
-    # ---- 2. IC: state at t=0 matches IC ----
-    # Network's first output should match the IC (we use the t=0 sample of t_wp)
-    L_ic = ((mu0_w[:, 0] - mu0_ic) / (mu0_ic.abs() + 1.0)).pow(2).mean()
-    L_ic = L_ic + ((mu1_w[:, 0] - mu1_ic) / (mu1_ic.abs() + 1.0)).pow(2).mean()
-    L_ic = L_ic + ((mu2_w[:, 0] - mu2_ic) / (mu2_ic.abs() + 1.0)).pow(2).mean()
-    L_ic = L_ic + ((mu3_w[:, 0] - mu3_ic) / (mu3_ic.abs() + 1.0)).pow(2).mean()
-    L_ic = L_ic + (c_w[:, 0] - c_ic).pow(2).mean()
+        # ---- 3. Output tracking: CV -> cv_sp, L_n -> ln_sp ----
+        cv_sp_b = cv_sp.unsqueeze(1)
+        ln_sp_b = ln_sp.unsqueeze(1)
+        L_ytrk = (((CV_w - cv_sp_b)).pow(2).mean()
+                  + ((Ln_w - ln_sp_b) / 15.0).pow(2).mean())
 
-    # ---- 3. Output tracking: CV -> cv_sp, L_n -> ln_sp at all tracking pts ----
-    cv_sp_b = cv_sp.unsqueeze(1)  # (B, 1) -> broadcast
-    ln_sp_b = ln_sp.unsqueeze(1)
-    L_ytrk = (((CV_w - cv_sp_b)).pow(2).mean()
-              + ((Ln_w - ln_sp_b) / 15.0).pow(2).mean())
+        # ---- 4. Input tracking ----
+        L_utrk = ((Tc_w - Tc_ic.unsqueeze(1)) / (T_C_HI - T_C_LO)).pow(2).mean()
 
-    # ---- 4. Input tracking: T_c -> reference (steady-state target, here u_eq=32) ----
-    # We track to the IC voltage (i.e., minimal action) as a soft prior on smoothness
-    L_utrk = ((Tc_w - Tc_ic.unsqueeze(1)) / (T_C_HI - T_C_LO)).pow(2).mean()
+        # ---- 5. Move suppression ----
+        dT = (Tc_w[:, 1:] - Tc_w[:, :-1]) / (T_C_HI - T_C_LO)
+        L_du = (dT.abs() - 0.1).clamp(min=0.0).pow(2).mean()
 
-    # ---- 5. Move suppression: |dT_c| between successive steps ----
-    dT = (Tc_w[:, 1:] - Tc_w[:, :-1]) / (T_C_HI - T_C_LO)
-    L_du = (dT.abs() - 0.1).clamp(min=0.0).pow(2).mean()   # soft hinge on |du| <= 0.1
+        # ---- 6. Input bounds ----
+        L_u = (F.relu(T_C_LO - Tc_w).pow(2) + F.relu(Tc_w - T_C_HI).pow(2)).mean()
 
-    # ---- 6. Input bounds: T_c in [25, 50] ----
-    L_u = (F.relu(T_C_LO - Tc_w).pow(2) + F.relu(Tc_w - T_C_HI).pow(2)).mean()
-
-    # ---- 7. State bounds: c >= 0 (concentration non-negative) ----
-    L_x = F.relu(-c_w).pow(2).mean()
+        # ---- 7. State bounds: c >= 0 ----
+        L_x = F.relu(-c_w).pow(2).mean()
+    else:
+        # Pure-distillation mode: all waypoint-dependent losses skipped.
+        L_ic = L_ytrk = L_utrk = L_du = L_u = L_x = _zero
 
     # ---- 8. NMPC behavior-cloning loss (only if u_nmpc provided) ----
     # Match PINN's T_c at t=1.0 (same query the controller uses) to NMPC oracle
