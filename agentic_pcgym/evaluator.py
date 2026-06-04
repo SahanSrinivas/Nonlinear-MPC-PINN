@@ -270,9 +270,15 @@ def evaluate_crystallization(
         # Add small randomisation
         x0 = x0 * rng.uniform(0.9, 1.1, 5).astype(np.float64)
         x0[4] = float(rng.uniform(0.2, 0.4))
-        # Random setpoints around the operating range
-        cv_sp = float(rng.uniform(0.5, 2.0))
-        ln_sp = float(rng.uniform(10.0, 20.0))
+        # Setpoints matched to Bloor 2025 Fig 6 protocol: TIGHT range around
+        # the operating point (CV ~ 1.0, Ln ~ 15 um). Previous version sampled
+        # cv_sp in [0.5, 2.0] which is 4x the operating range — even the NMPC
+        # oracle can't track such extreme changes in 30 hours, so both PINN
+        # and oracle saturated to bad rewards (~-17000) and opt_gap was
+        # uninformative. Bloor's RL gets opt_gap ~0.01 because they stay near
+        # the operating point. We now do the same.
+        cv_sp = float(rng.uniform(0.9, 1.2))    # tight around CV ~ 1.0
+        ln_sp = float(rng.uniform(14.0, 16.0))  # tight around Ln ~ 15 um
         # Run controller under test
         r_pi = closed_loop_crystallization(controller_query, x0, cv_sp, ln_sp)
         # Run oracle on same scenario

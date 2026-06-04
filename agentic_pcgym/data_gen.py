@@ -37,21 +37,29 @@ def sample_crystallization_episodes(N: int, seed: int = 0,
     rng = np.random.default_rng(seed)
     op = CrystOperatingPoint()
     b = CrystBounds()
-    # Sample log-uniform mu_0 and derive consistent moments
-    mu0 = np.exp(rng.uniform(np.log(0.1), np.log(10.0), N)).astype(np.float32)
-    # L_n in [5, 25]
-    Ln = rng.uniform(5.0, 25.0, N).astype(np.float32)
+    # Sample log-uniform mu_0 and derive consistent moments.
+    # mu_0 stays wide (number of crystals can vary 100x); but Ln and CV are
+    # tightened to Bloor's operating envelope (vs previous [0.5, 3] and [5, 25])
+    # so the PINN sees achievable NMPC trajectories during training.
+    mu0 = np.exp(rng.uniform(np.log(0.5), np.log(5.0), N)).astype(np.float32)
+    # L_n initial in [12, 18]: slightly wider than the setpoint range [14, 16]
+    Ln = rng.uniform(12.0, 18.0, N).astype(np.float32)
     mu1 = mu0 * Ln
-    # CV in [0.5, 3.0]: CV^2 = mu_2*mu_0/mu_1^2 - 1
-    CV = rng.uniform(0.5, 3.0, N).astype(np.float32)
+    # CV initial in [0.7, 1.5]: slightly wider than the setpoint range [0.9, 1.2]
+    CV = rng.uniform(0.7, 1.5, N).astype(np.float32)
     mu2 = (CV * CV + 1) * mu1 * mu1 / mu0
     # mu_3 ~ mu_0 * L_n^3 (volume-equivalent)
     mu3 = mu0 * Ln ** 3
     # Concentration: random in [0.1, 0.5]
     c = rng.uniform(0.1, 0.5, N).astype(np.float32)
-    # Setpoints
-    cv_sp = rng.uniform(0.5, 2.5, N).astype(np.float32)
-    ln_sp = rng.uniform(5.0, 25.0, N).astype(np.float32)
+    # Setpoints — matched to Bloor 2025 Fig 6 operating envelope (NARROW).
+    # Previously used [0.5, 2.5] for cv_sp and [5, 25] for ln_sp, which
+    # contained physically-unreachable setpoint excursions (>4x the operating
+    # window) where even the NMPC oracle gave up. This polluted the training
+    # data with weird NMPC actions. Tightening to Bloor's actual operating
+    # range gives the PINN clean NMPC labels to mimic.
+    cv_sp = rng.uniform(0.9, 1.2, N).astype(np.float32)   # tight around CV ~ 1.0
+    ln_sp = rng.uniform(14.0, 16.0, N).astype(np.float32)  # tight around Ln ~ 15 um
     # T_c IC
     Tc = rng.uniform(b.T_c_min, b.T_c_max, N).astype(np.float32)
 
