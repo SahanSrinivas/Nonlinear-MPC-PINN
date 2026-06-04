@@ -132,6 +132,10 @@ class CrystPINNHparams:
     w_du:    float = 1.0     # move suppression
     w_u:     float = 100.0   # input bound violation
     w_x:     float = 10.0    # state bound violation
+    # NMPC behavior-cloning weight: matches PINN(t=1, x_IC, sp) to NMPC oracle
+    # action T_c_NMPC. Active only when episodes contain "u_nmpc" (query_nmpc=True).
+    # Default 0 preserves backward compatibility.
+    w_nmpc:  float = 0.0
     # Optimizer
     lr1:     float = 1e-3
     lr2:     float = 2e-4

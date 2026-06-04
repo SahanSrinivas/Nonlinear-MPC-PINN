@@ -67,6 +67,18 @@ FT_DEFAULT = {"w_ode": 342.94, "w_ic": 0.30, "w_ytrk": 4.71, "w_xtrk": 0.13,
 # bench.py does not enable this by default (sample_fourtank_episodes uses
 # query_nmpc=False). Use run_nmpc_distillation_fourtank.py to opt in.
 
+# ============================================================================
+# Distillation-mode search spaces: adds w_nmpc to the joint search.
+# Activated by --use-distillation flag.
+# ============================================================================
+FT_HSPACE_DISTILL = {**FT_HSPACE,
+                       "w_nmpc": (10.0, 2000.0, True)}   # ~order-of-magnitude
+FT_DEFAULT_DISTILL = {**FT_DEFAULT, "w_nmpc": 200.0}
+
+CRYST_HSPACE_DISTILL = {**CRYST_HSPACE,
+                          "w_nmpc": (10.0, 2000.0, True)}
+CRYST_DEFAULT_DISTILL = {**CRYST_DEFAULT, "w_nmpc": 200.0}
+
 
 def _clip(cfg: dict, hspace: dict) -> dict:
     return {n: max(lo, min(hi, float(cfg.get(n, 0.5*(lo+hi)))))
@@ -226,9 +238,13 @@ except Exception as _e:
 def train_and_score_crystallization(cfg: dict, episodes: dict,
                                       K1: int, K2: int, bs: int,
                                       n_eval_reps: int = 5) -> dict:
-    hp = CrystPINNHparams(K1=K1, K2=K2, bs=bs, **{k: float(cfg[k])
-        for k in ["w_ode", "w_ic", "w_ytrk", "w_utrk", "w_du", "w_u", "w_x",
-                   "lr1", "lr2"]})
+    hp_kwargs = {k: float(cfg[k])
+                  for k in ["w_ode", "w_ic", "w_ytrk", "w_utrk", "w_du", "w_u",
+                             "w_x", "lr1", "lr2"]}
+    # NMPC-distillation weight (only present if --use-distillation was set)
+    if "w_nmpc" in cfg:
+        hp_kwargs["w_nmpc"] = float(cfg["w_nmpc"])
+    hp = CrystPINNHparams(K1=K1, K2=K2, bs=bs, **hp_kwargs)
     net = PINN_Crystallization().to(DEVICE)
     t0 = time.time()
     hist = train_pinn_crystallization(net, episodes, hp, verbose=False)
@@ -253,9 +269,13 @@ def train_and_score_crystallization(cfg: dict, episodes: dict,
 def train_and_score_fourtank(cfg: dict, episodes: dict,
                               K1: int, K2: int, bs: int,
                               n_eval_reps: int = 5) -> dict:
-    hp = FourTankPINNHparams(K1=K1, K2=K2, bs=bs, **{k: float(cfg[k])
-        for k in ["w_ode", "w_ic", "w_ytrk", "w_xtrk", "w_utrk", "w_du",
-                   "w_u", "lr1", "lr2"]})
+    hp_kwargs = {k: float(cfg[k])
+                  for k in ["w_ode", "w_ic", "w_ytrk", "w_xtrk", "w_utrk",
+                             "w_du", "w_u", "lr1", "lr2"]}
+    # NMPC-distillation weight (only present if --use-distillation was set)
+    if "w_nmpc" in cfg:
+        hp_kwargs["w_nmpc"] = float(cfg["w_nmpc"])
+    hp = FourTankPINNHparams(K1=K1, K2=K2, bs=bs, **hp_kwargs)
     net = PINN_FourTank().to(DEVICE)
     t0 = time.time()
     hist = train_pinn_fourtank(net, episodes, hp, verbose=False)
@@ -280,8 +300,18 @@ def train_and_score_fourtank(cfg: dict, episodes: dict,
 def run_bench(case: str, tuner_name: str, n_trials: int,
                 episodes: dict, K1: int, K2: int, bs: int,
                 out_dir: Path, n_eval_reps: int = 5, seed: int = 0):
-    hspace = CRYST_HSPACE if case == "crystallization" else FT_HSPACE
-    default = CRYST_DEFAULT if case == "crystallization" else FT_DEFAULT
+    # Use distillation-mode search space if episodes contain u_nmpc
+    is_distill = (episodes.get("u_nmpc") is not None)
+    if is_distill:
+        hspace = (CRYST_HSPACE_DISTILL if case == "crystallization"
+                   else FT_HSPACE_DISTILL)
+        default = (CRYST_DEFAULT_DISTILL if case == "crystallization"
+                    else FT_DEFAULT_DISTILL)
+        print(f"  [bench] NMPC distillation MODE — searching {len(hspace)} "
+              f"params including w_nmpc")
+    else:
+        hspace = CRYST_HSPACE if case == "crystallization" else FT_HSPACE
+        default = CRYST_DEFAULT if case == "crystallization" else FT_DEFAULT
     tuner_cls = TUNERS[tuner_name]
     if tuner_name == "llm":
         tuner = tuner_cls(hspace, seed=seed, defaults=default)
@@ -345,6 +375,12 @@ def main():
                      help="Closed-loop evaluation reps per trial")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=str, default="results/pcgym")
+    ap.add_argument("--use-distillation", action="store_true",
+                     help="Sample episodes WITH NMPC labels and add w_nmpc to "
+                          "the search space. Activates distillation-mode tuning.")
+    ap.add_argument("--episodes-cache", type=str, default=None,
+                     help="If set, load NMPC-labeled episodes from this path "
+                          "instead of resampling (requires --use-distillation).")
     a = ap.parse_args()
 
     print(f"=== PC-Gym bench: {a.case} ===")
@@ -356,11 +392,28 @@ def main():
     print()
 
     # Pre-sample training episodes ONCE (NMPC queries are expensive)
-    print(f"Generating {a.n_train_eps} training episodes...")
     sample_fn = (sample_crystallization_episodes if a.case == "crystallization"
                   else sample_fourtank_episodes)
-    episodes = sample_fn(N=a.n_train_eps, seed=a.seed, query_nmpc=False,
-                          verbose=True)
+    if a.use_distillation and a.episodes_cache and Path(a.episodes_cache).exists():
+        print(f"Loading cached NMPC-labeled episodes from {a.episodes_cache}...")
+        from agentic_pcgym.data_gen import load_episodes as _load
+        episodes = _load(a.episodes_cache)
+        if episodes.get("u_nmpc") is None:
+            raise RuntimeError(
+                f"Cached episodes at {a.episodes_cache} have no u_nmpc; "
+                "re-sample with query_nmpc=True.")
+        print(f"  loaded {len(episodes[list(episodes.keys())[0]])} episodes with NMPC labels")
+    else:
+        print(f"Generating {a.n_train_eps} training episodes "
+              f"(query_nmpc={a.use_distillation})...")
+        episodes = sample_fn(N=a.n_train_eps, seed=a.seed,
+                              query_nmpc=a.use_distillation, verbose=True)
+        if a.use_distillation:
+            cache_path = Path(a.out) / a.case / "episodes_with_nmpc.pt"
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            from agentic_pcgym.data_gen import save_episodes as _save
+            _save(episodes, str(cache_path))
+            print(f"  cached NMPC-labeled episodes to {cache_path}")
     print()
 
     out_dir = Path(a.out) / a.case

@@ -199,10 +199,15 @@ def composite_loss_crystallization(
         mu0_ic, mu1_ic, mu2_ic, mu3_ic, c_ic, cv_sp, ln_sp, Tc_ic,
         # weights
         w_ode, w_ic, w_ytrk, w_utrk, w_du, w_u, w_x,
-        p: CrystParams) -> tuple[torch.Tensor, dict]:
+        p: CrystParams,
+        u_nmpc_batch: torch.Tensor | None = None,
+        w_nmpc: float = 0.0) -> tuple[torch.Tensor, dict]:
     """Full composite loss for the crystallization PINN.
 
     Returns (total_loss, components_dict).
+
+    NMPC distillation: if u_nmpc_batch is provided and w_nmpc > 0, adds an
+    L_nmpc term matching PINN's T_c prediction at t=1.0 to the NMPC oracle.
     """
     B = mu0_ic.shape[0]
     N_WP = t_wp.shape[0]
@@ -261,10 +266,22 @@ def composite_loss_crystallization(
     # ---- 7. State bounds: c >= 0 (concentration non-negative) ----
     L_x = F.relu(-c_w).pow(2).mean()
 
+    # ---- 8. NMPC behavior-cloning loss (only if u_nmpc provided) ----
+    # Match PINN's T_c at t=1.0 (same query the controller uses) to NMPC oracle
+    L_nmpc = torch.tensor(0.0, device=mu0_ic.device)
+    if u_nmpc_batch is not None and w_nmpc > 0.0:
+        t_query = torch.full_like(mu0_ic, 1.0)
+        _, _, _, _, _, Tc_q = net(
+            t_query, mu0_ic, mu1_ic, mu2_ic, mu3_ic, c_ic,
+            cv_sp, ln_sp, Tc_ic)
+        L_nmpc = ((Tc_q - u_nmpc_batch) / (T_C_HI - T_C_LO)).pow(2).mean()
+
     total = (w_ode * L_ode + w_ic * L_ic + w_ytrk * L_ytrk + w_utrk * L_utrk
-              + w_du * L_du + w_u * L_u + w_x * L_x)
+              + w_du * L_du + w_u * L_u + w_x * L_x
+              + w_nmpc * L_nmpc)
     components = {"L_ode": L_ode, "L_ic": L_ic, "L_ytrk": L_ytrk,
-                   "L_utrk": L_utrk, "L_du": L_du, "L_u": L_u, "L_x": L_x}
+                   "L_utrk": L_utrk, "L_du": L_du, "L_u": L_u, "L_x": L_x,
+                   "L_nmpc": L_nmpc}
     return total, components
 
 
@@ -375,6 +392,15 @@ def train_pinn_crystallization(
     arrays = [episodes[k].to(DEVICE) for k in keys]
     N_total = arrays[0].shape[0]
 
+    # NMPC-distillation labels (used iff hp.w_nmpc > 0 AND episodes has u_nmpc).
+    # Crystallization u_nmpc shape: (N_total,) — single T_c per episode.
+    u_nmpc_tensor = None
+    if getattr(hp, "w_nmpc", 0.0) > 0.0:
+        u_nmpc_arr = episodes.get("u_nmpc")
+        if u_nmpc_arr is not None:
+            u_nmpc_tensor = u_nmpc_arr.to(DEVICE) if isinstance(u_nmpc_arr, torch.Tensor) \
+                            else torch.from_numpy(u_nmpc_arr).to(DEVICE)
+
     # Importance weights for hard episodes (extreme CV/L_n setpoints)
     use_importance = getattr(hp, "importance_alpha", 0.0) > 0.0
     if use_importance:
@@ -388,24 +414,33 @@ def train_pinn_crystallization(
         torch.manual_seed(seed + 1)
 
     def get_batch(ep_idx):
+        """Returns (arrays_batch, u_nmpc_batch_or_None)."""
         if use_importance:
             idx = torch.multinomial(weights, hp.bs, replacement=True)
             idx = idx.to(arrays[0].device)
-            return [a[idx] for a in arrays]
+            arr_batch = [a[idx] for a in arrays]
+            nmpc_batch = u_nmpc_tensor[idx] if u_nmpc_tensor is not None else None
+            return arr_batch, nmpc_batch
         s = (ep_idx * hp.bs) % N_total
         e = s + hp.bs
         if e <= N_total:
-            return [a[s:e] for a in arrays]
-        return [torch.cat([a[s:], a[:e - N_total]]) for a in arrays]
+            arr_batch = [a[s:e] for a in arrays]
+            nmpc_batch = u_nmpc_tensor[s:e] if u_nmpc_tensor is not None else None
+        else:
+            arr_batch = [torch.cat([a[s:], a[:e - N_total]]) for a in arrays]
+            nmpc_batch = (torch.cat([u_nmpc_tensor[s:], u_nmpc_tensor[:e - N_total]])
+                          if u_nmpc_tensor is not None else None)
+        return arr_batch, nmpc_batch
 
     # Phase 1: no bound terms
     opt = torch.optim.Adam(net.parameters(), lr=hp.lr1)
     for ep in range(1, hp.K1 + 1):
-        bat = get_batch(ep - 1)
+        bat, nmpc_bat = get_batch(ep - 1)
         loss, comps = composite_loss_crystallization(
             net, t_wp, t_col, *bat,
             hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_utrk,
-            0.0, 0.0, 0.0, p)
+            0.0, 0.0, 0.0, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": [], "nan_at": ("P1", ep)}
         opt.zero_grad(); loss.backward(); opt.step()
@@ -416,11 +451,12 @@ def train_pinn_crystallization(
     # Phase 2: full loss
     opt = torch.optim.Adam(net.parameters(), lr=hp.lr2)
     for ep in range(1, hp.K2 + 1):
-        bat = get_batch(ep - 1)
+        bat, nmpc_bat = get_batch(ep - 1)
         loss, comps = composite_loss_crystallization(
             net, t_wp, t_col, *bat,
             hp.w_ode, hp.w_ic, hp.w_ytrk, hp.w_utrk,
-            hp.w_du, hp.w_u, hp.w_x, p)
+            hp.w_du, hp.w_u, hp.w_x, p,
+            u_nmpc_batch=nmpc_bat, w_nmpc=hp.w_nmpc)
         if torch.isnan(loss):
             return {"hist_p1": hist_p1, "hist_p2": hist_p2, "nan_at": ("P2", ep)}
         opt.zero_grad(); loss.backward(); opt.step()
