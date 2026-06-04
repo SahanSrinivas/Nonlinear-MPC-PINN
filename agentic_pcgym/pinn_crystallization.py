@@ -74,7 +74,10 @@ class PINN_Crystallization(nn.Module):
     INPUT_DIM = 9
     OUTPUT_DIM = 6
 
-    def __init__(self, hidden_layers: List[int] = [64, 64, 64]):
+    def __init__(self, hidden_layers: List[int] = [128, 128, 128, 128]):
+        """4 hidden layers x 128 units (~67K params, vs prior [64,64,64] ~10K).
+        Bigger capacity for better mimicking NMPC's complex Tc policy.
+        """
         super().__init__()
         layers = []
         in_dim = self.INPUT_DIM
@@ -114,7 +117,10 @@ class PINN_Crystallization(nn.Module):
         mu2_pred = _log_denorm(out[..., 2], MU_2_LOG_LO, MU_2_LOG_HI)
         mu3_pred = _log_denorm(out[..., 3], MU_3_LOG_LO, MU_3_LOG_HI)
         c_pred   = out[..., 4] * (C_HI - C_LO) + C_LO
-        Tc_pred  = out[..., 5] * (T_C_HI - T_C_LO) + T_C_LO
+        # T_c BOUNDED via sigmoid -> guaranteed in [T_C_LO, T_C_HI] = [25, 50].
+        # Smooth gradients (no clipping discontinuity). At init, T_c ~ 37.5 C
+        # (middle of range), which is close to the operating point.
+        Tc_pred  = T_C_LO + (T_C_HI - T_C_LO) * torch.sigmoid(out[..., 5])
         return mu0_pred, mu1_pred, mu2_pred, mu3_pred, c_pred, Tc_pred
 
 

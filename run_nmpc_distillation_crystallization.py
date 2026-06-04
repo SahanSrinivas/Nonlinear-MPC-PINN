@@ -40,31 +40,23 @@ from agentic_pcgym.data_gen import (
 from agentic_pcgym.evaluator import evaluate_crystallization
 
 
-# PURE-DISTILLATION (behavior-cloning) defaults for crystallization.
-# All physics weights = 0 because crystallization's PINN has a log_denorm
-# output layer (10^x) that produces NaN in the ODE residual at any small
-# weight update. Even gradient clipping doesn't help — the NaN originates
-# inside the forward pass, not from gradient magnitude.
-#
-# This is pure behavior cloning from NMPC: the PINN learns to mimic NMPC's
-# action at t=1.0, with no physics regularization. Trade-off: we lose physics
-# consistency guarantees, but gain numerical stability AND a clean paper
-# ablation showing the L_nmpc term alone suffices on this benchmark.
-#
-# Learning rates BUMPED UP (vs original NaN-safe defaults): since no physics
-# losses are active, there's no NaN risk from large gradients. Standard
-# supervised-learning rates (1e-3) let the network escape the "output the
-# distribution mean" plateau and actually fit u_NMPC.
+# PHYSICS-INFORMED + DISTILLATION defaults (v3 architecture).
+# With the bigger network ([128,128,128,128]) and sigmoid-bounded T_c output,
+# we can safely re-enable physics losses at LOW weights. They act as soft
+# regularizers without dominating training; L_nmpc still dominates via
+# w_nmpc=500.
+# T_c output is now guaranteed in [25, 50] by sigmoid → no more LSODA crashes
+# from extreme T_c → physics losses can be evaluated stably.
 CRYST_DEFAULT_CFG = {
-    "w_ode":   0.0,
-    "w_ic":    0.0,
-    "w_ytrk":  0.0,
-    "w_utrk":  0.0,
-    "w_du":    0.0,
-    "w_u":     0.0,
-    "w_x":     0.0,
-    "lr1":     2e-3,    # was 1e-4 — 20x higher now that physics is OFF
-    "lr2":     5e-4,    # was 5e-5 — 10x higher
+    "w_ode":   0.5,     # small physics regularizer
+    "w_ic":    0.1,
+    "w_ytrk":  1.0,     # tracking still useful
+    "w_utrk":  0.05,
+    "w_du":    0.5,     # move suppression
+    "w_u":     2.0,     # input bounds (sigmoid already enforces, so small)
+    "w_x":     0.5,
+    "lr1":     1e-3,    # bigger network → use moderate lr
+    "lr2":     2e-4,
 }
 
 
@@ -101,8 +93,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-train-eps", type=int, default=2000,
                      help="Number of episodes to sample WITH NMPC (slow!)")
-    ap.add_argument("--K1", type=int, default=10000)
-    ap.add_argument("--K2", type=int, default=10000)
+    ap.add_argument("--K1", type=int, default=20000,
+                     help="Phase 1 epochs (was 10000, doubled for bigger net)")
+    ap.add_argument("--K2", type=int, default=20000,
+                     help="Phase 2 epochs (was 10000, doubled for bigger net)")
     ap.add_argument("--bs", type=int, default=64)
     ap.add_argument("--w-nmpc", type=float, default=500.0,
                      help="Weight on the L_nmpc behavior-cloning term. "
