@@ -44,9 +44,9 @@ CRYST_HSPACE = {
     "lr1":     (1e-4,  1e-2,   True),
     "lr2":     (1e-5,  1e-3,   True),
 }
-CRYST_DEFAULT = {"w_ode": 100.0, "w_ic": 10.0, "w_ytrk": 10.0, "w_utrk": 1.0,
-                  "w_du": 1.0, "w_u": 100.0, "w_x": 10.0,
-                  "lr1": 1e-3, "lr2": 2e-4}
+CRYST_DEFAULT = {"w_ode": 250.0, "w_ic": 1.0, "w_ytrk": 5.0, "w_utrk": 0.1,
+                  "w_du": 2.0, "w_u": 50.0, "w_x": 5.0,
+                  "lr1": 5e-4, "lr2": 1e-4}
 
 FT_HSPACE = {
     "w_ode":   (1.0,   1000.0, True),
@@ -59,9 +59,9 @@ FT_HSPACE = {
     "lr1":     (1e-4,  1e-2,   True),
     "lr2":     (1e-5,  1e-3,   True),
 }
-FT_DEFAULT = {"w_ode": 100.0, "w_ic": 10.0, "w_ytrk": 10.0, "w_xtrk": 1.0,
-               "w_utrk": 1.0, "w_du": 1.0, "w_u": 100.0,
-               "lr1": 1e-3, "lr2": 2e-4}
+FT_DEFAULT = {"w_ode": 342.94, "w_ic": 0.30, "w_ytrk": 4.71, "w_xtrk": 0.13,
+               "w_utrk": 0.04, "w_du": 1.44, "w_u": 19.25,
+               "lr1": 1.67e-3, "lr2": 2.97e-4}
 
 
 def _clip(cfg: dict, hspace: dict) -> dict:
@@ -208,6 +208,13 @@ Propose ONE config to try next. STRICT JSON only.
 TUNERS = {"random": RandomTuner, "bo": BOTuner,
            "optuna": OptunaTuner, "llm": LLMTuner}
 
+# Late-bind LEAN to avoid circular import at module load
+try:
+    from .lean_tuner import LeanTunerPCGym
+    TUNERS["lean"] = LeanTunerPCGym
+except Exception as _e:
+    print(f"[bench] LEAN tuner not available: {_e}")
+
 
 # ============================================================================
 # Train-and-score wrappers for each case study
@@ -274,6 +281,8 @@ def run_bench(case: str, tuner_name: str, n_trials: int,
     tuner_cls = TUNERS[tuner_name]
     if tuner_name == "llm":
         tuner = tuner_cls(hspace, seed=seed, defaults=default)
+    elif tuner_name == "lean":
+        tuner = tuner_cls(hspace, seed=seed, defaults=default, case=case)
     else:
         tuner = tuner_cls(hspace, seed=seed)
     trial_fn = (train_and_score_crystallization if case == "crystallization"
@@ -282,15 +291,31 @@ def run_bench(case: str, tuner_name: str, n_trials: int,
     out_dir.mkdir(parents=True, exist_ok=True)
     for i in range(1, n_trials + 1):
         cfg = tuner.ask()
+        # Strip LEAN diagnosis metadata (not a hparam)
+        diag_meta = cfg.pop("__lean_diagnosis__", None)
         t0 = time.time()
         res = trial_fn(cfg, episodes, K1, K2, bs, n_eval_reps)
         elapsed = time.time() - t0
         score = res["score"]
-        tuner.tell(cfg, score)
+        # LEAN tuner needs metrics; LLM/BO/random just get score
+        if tuner_name == "lean":
+            tuner.tell(cfg, score, metrics={
+                "optimality_gap": res.get("optimality_gap"),
+                "MAD": res.get("MAD"),
+            })
+        else:
+            tuner.tell(cfg, score)
         if score < best: best, best_cfg = score, dict(cfg)
-        trials.append({"iter": i, "cfg": cfg, **res, "elapsed_s": elapsed})
+        trial_log = {"iter": i, "cfg": cfg, **res, "elapsed_s": elapsed}
+        if diag_meta is not None:
+            trial_log["lean_diagnosis"] = diag_meta
+        trials.append(trial_log)
+        diag_str = ""
+        if diag_meta is not None:
+            diag_str = (f"  [{diag_meta.get('failure_mode')}/"
+                          f"{diag_meta.get('severity')}]")
         print(f"  [{tuner_name}] iter {i:>2}/{n_trials}: score={score:.4f}  "
-               f"best={best:.4f}  ({elapsed:.0f}s)")
+               f"best={best:.4f}  ({elapsed:.0f}s){diag_str}")
         # Checkpoint after every trial
         with (out_dir / f"{tuner_name}.json").open("w") as f:
             json.dump({"tuner": tuner_name, "case": case,
@@ -303,7 +328,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", choices=["crystallization", "fourtank"],
                      required=True)
-    ap.add_argument("--tuners", nargs="+", default=["random", "bo", "optuna", "llm"])
+    ap.add_argument("--tuners", nargs="+",
+                     default=["random", "bo", "optuna", "llm"],
+                     help="Choices: random, bo, optuna, llm, lean")
     ap.add_argument("--n-trials", type=int, default=10)
     ap.add_argument("--K1", type=int, default=2000)
     ap.add_argument("--K2", type=int, default=2000)

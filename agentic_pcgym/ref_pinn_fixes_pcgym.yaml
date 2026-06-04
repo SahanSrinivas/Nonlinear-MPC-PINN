@@ -1,0 +1,267 @@
+# Reference PINN-MPC tuning playbook for PC-Gym four-tank and crystallization.
+#
+# Same 3-agent structure as the SISO playbook (ref_pinn_fixes.yaml):
+#   Diagnostic -> classifies failure mode from (opt_gap, MAD) ratios vs reference
+#   Strategy   -> selects playbook entry by (failure_mode, severity)
+#   Tuning     -> applies multipliers, clips to HSPACE bounds
+#
+# Reference values are the best published RL baselines (Bloor 2025 Table 5, 6).
+# Failure modes are derived from two signals:
+#   gap_ratio = observed_opt_gap / reference_opt_gap
+#   mad_ratio = observed_MAD     / reference_MAD
+#
+# Severity tiers (worst of the two ratios):
+#   1.2  - 1.5 : moderate
+#   1.5  - 3.0 : severe
+#   >  3.0     : critical
+#   < 1.2      : mild  (essentially "in band")
+#
+# Multipliers are RELATIVE to the current best config.
+# A multiplier can be a scalar (direct scale) or [lo, hi] (uniform sample).
+
+fourtank:
+
+  reference:
+    # Bloor 2025 Table 5+6 for four-tank (SAC = best MAD; DDPG = best opt_gap)
+    opt_gap: 0.0537   # SAC
+    MAD:     0.0788   # SAC
+
+  playbook:
+
+    - failure_mode: opt_gap_high
+      severity: mild
+      rationale: "tracking accuracy slightly off; gentle physics emphasis"
+      param_changes:
+        w_ode:  1.20
+        w_ytrk: 0.85
+
+    - failure_mode: opt_gap_high
+      severity: moderate
+      rationale: "tracking error noticeable; push physics, soften tracking penalty"
+      param_changes:
+        w_ode:  1.50
+        w_ytrk: 0.70
+        w_xtrk: 0.80
+        w_utrk: 0.70
+
+    - failure_mode: opt_gap_high
+      severity: severe
+      rationale: "tracking error dominant; aggressive physics, strip control loss"
+      param_changes:
+        w_ode:  2.00
+        w_ytrk: 0.50
+        w_xtrk: 0.60
+        w_utrk: 0.40
+        w_u:    0.70
+
+    - failure_mode: opt_gap_high
+      severity: critical
+      rationale: "model is far from physically consistent; max physics, minimal control loss"
+      param_changes:
+        w_ode:  3.00
+        w_ytrk: 0.30
+        w_xtrk: 0.40
+        w_utrk: 0.20
+        w_u:    0.50
+        lr1:    0.80
+        lr2:    0.85
+
+    - failure_mode: MAD_high
+      severity: mild
+      rationale: "policy variance slightly elevated; gentle move suppression"
+      param_changes:
+        w_du:   1.30
+
+    - failure_mode: MAD_high
+      severity: moderate
+      rationale: "policy variance moderately high; firmer move suppression + slower lr2"
+      param_changes:
+        w_du:   1.70
+        lr2:    0.70
+
+    - failure_mode: MAD_high
+      severity: severe
+      rationale: "policy oscillatory; aggressive smoothing, lower learning rates"
+      param_changes:
+        w_du:   2.50
+        w_utrk: 1.30
+        lr1:    0.70
+        lr2:    0.50
+
+    - failure_mode: MAD_high
+      severity: critical
+      rationale: "policy diverges across reps; max smoothing, lowest training rates"
+      param_changes:
+        w_du:   3.50
+        w_utrk: 1.50
+        lr1:    0.50
+        lr2:    0.40
+
+    - failure_mode: both_high
+      severity: moderate
+      rationale: "both accuracy and variance off; physics + smoothing"
+      param_changes:
+        w_ode:  1.40
+        w_ytrk: 0.80
+        w_du:   1.40
+        lr2:    0.80
+
+    - failure_mode: both_high
+      severity: severe
+      rationale: "both axes severely off; strong physics, strong smoothing"
+      param_changes:
+        w_ode:  1.80
+        w_ytrk: 0.60
+        w_utrk: 0.50
+        w_du:   2.00
+        lr1:    0.70
+        lr2:    0.60
+
+    - failure_mode: both_high
+      severity: critical
+      rationale: "system pathological; max physics + max smoothing + min lr"
+      param_changes:
+        w_ode:  2.50
+        w_ytrk: 0.40
+        w_xtrk: 0.50
+        w_utrk: 0.30
+        w_du:   3.00
+        lr1:    0.50
+        lr2:    0.40
+
+    - failure_mode: all_in_band
+      severity: mild
+      rationale: "all metrics within tolerance; explore ±15% around best"
+      param_changes:
+        w_ode:  [0.85, 1.20]
+        w_ytrk: [0.85, 1.20]
+        w_xtrk: [0.85, 1.20]
+        w_du:   [0.85, 1.20]
+        lr1:    [0.85, 1.15]
+        lr2:    [0.85, 1.15]
+
+
+crystallization:
+
+  reference:
+    # Bloor 2025 Table 5+6 for crystallization (PPO = best opt_gap; SAC = best MAD)
+    opt_gap: 0.0103   # PPO
+    MAD:     0.0009   # SAC
+
+  playbook:
+
+    - failure_mode: opt_gap_high
+      severity: mild
+      rationale: "tracking accuracy slightly off; gentle physics emphasis"
+      param_changes:
+        w_ode:  1.20
+        w_ytrk: 0.85
+
+    - failure_mode: opt_gap_high
+      severity: moderate
+      rationale: "tracking error noticeable; push physics, soften tracking penalty"
+      param_changes:
+        w_ode:  1.50
+        w_ytrk: 0.70
+        w_utrk: 0.70
+        w_x:    0.80
+
+    - failure_mode: opt_gap_high
+      severity: severe
+      rationale: "tracking error dominant; aggressive physics, strip control loss"
+      param_changes:
+        w_ode:  2.00
+        w_ytrk: 0.50
+        w_utrk: 0.40
+        w_x:    0.60
+        w_u:    0.70
+
+    - failure_mode: opt_gap_high
+      severity: critical
+      rationale: "max physics, minimal control loss, lower lr to prevent divergence"
+      param_changes:
+        w_ode:  2.50
+        w_ytrk: 0.40
+        w_utrk: 0.30
+        w_u:    0.50
+        lr1:    0.70
+        lr2:    0.60
+
+    - failure_mode: MAD_high
+      severity: mild
+      rationale: "policy variance slightly elevated; gentle move suppression"
+      param_changes:
+        w_du:   1.30
+
+    - failure_mode: MAD_high
+      severity: moderate
+      rationale: "policy variance moderately high; firmer move suppression"
+      param_changes:
+        w_du:   1.70
+        lr2:    0.70
+
+    - failure_mode: MAD_high
+      severity: severe
+      rationale: "policy oscillatory; aggressive smoothing"
+      param_changes:
+        w_du:   2.50
+        w_utrk: 1.30
+        lr2:    0.50
+
+    - failure_mode: MAD_high
+      severity: critical
+      rationale: "policy diverges; max smoothing + lowest lr"
+      param_changes:
+        w_du:   3.50
+        w_utrk: 1.50
+        lr1:    0.60
+        lr2:    0.40
+
+    - failure_mode: both_high
+      severity: moderate
+      rationale: "both off; physics + smoothing"
+      param_changes:
+        w_ode:  1.40
+        w_ytrk: 0.80
+        w_du:   1.40
+        lr2:    0.80
+
+    - failure_mode: both_high
+      severity: severe
+      rationale: "both severely off; strong physics + strong smoothing"
+      param_changes:
+        w_ode:  1.80
+        w_ytrk: 0.60
+        w_utrk: 0.50
+        w_du:   2.00
+        lr1:    0.70
+        lr2:    0.60
+
+    - failure_mode: both_high
+      severity: critical
+      rationale: "pathological; max physics + max smoothing + min lr"
+      param_changes:
+        w_ode:  2.50
+        w_ytrk: 0.40
+        w_utrk: 0.30
+        w_du:   3.00
+        lr1:    0.50
+        lr2:    0.40
+
+    - failure_mode: all_in_band
+      severity: mild
+      rationale: "all metrics within tolerance; explore ±15% around best"
+      param_changes:
+        w_ode:  [0.85, 1.20]
+        w_ytrk: [0.85, 1.20]
+        w_du:   [0.85, 1.20]
+        lr1:    [0.85, 1.15]
+        lr2:    [0.85, 1.15]
+
+    - failure_mode: training_unstable
+      severity: critical
+      rationale: "NaN during training; halve learning rates, drop physics weight"
+      param_changes:
+        w_ode:  0.50
+        lr1:    0.50
+        lr2:    0.50

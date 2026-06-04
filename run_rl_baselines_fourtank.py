@@ -148,10 +148,14 @@ def make_model(algo_name: str, env: gym.Env, seed: int = 0):
                     learning_rate=3e-4, buffer_size=100_000,
                     batch_size=256, gamma=0.99, tau=0.005)
     if algo_name == "DDPG":
+        # σ must scale with action range. action_space = [0, 15] V, so
+        # σ = 0.1 × 15 = 1.5 V (~10% of range, SB3 best practice).
+        # Previous σ=0.1 in raw V was only 0.7% of range → DDPG failed to explore.
         n_actions = 2
+        v_range = 15.0   # FourTankBounds.v_max - v_min
         action_noise = NormalActionNoise(
             mean=np.zeros(n_actions),
-            sigma=0.1 * np.ones(n_actions))
+            sigma=0.1 * v_range * np.ones(n_actions))
         return DDPG("MlpPolicy", env, action_noise=action_noise,
                      verbose=0, seed=seed,
                      learning_rate=1e-3, buffer_size=100_000,
