@@ -50,16 +50,21 @@ from agentic_pcgym.evaluator import evaluate_crystallization
 # action at t=1.0, with no physics regularization. Trade-off: we lose physics
 # consistency guarantees, but gain numerical stability AND a clean paper
 # ablation showing the L_nmpc term alone suffices on this benchmark.
+#
+# Learning rates BUMPED UP (vs original NaN-safe defaults): since no physics
+# losses are active, there's no NaN risk from large gradients. Standard
+# supervised-learning rates (1e-3) let the network escape the "output the
+# distribution mean" plateau and actually fit u_NMPC.
 CRYST_DEFAULT_CFG = {
-    "w_ode":   0.0,     # OFF — too unstable for crystallization
-    "w_ic":    0.0,     # OFF
-    "w_ytrk":  0.0,     # OFF (NMPC label encodes tracking implicitly)
-    "w_utrk":  0.0,     # OFF
-    "w_du":    0.0,     # OFF
-    "w_u":     0.0,     # OFF
-    "w_x":     0.0,     # OFF
-    "lr1":     1e-4,
-    "lr2":     5e-5,
+    "w_ode":   0.0,
+    "w_ic":    0.0,
+    "w_ytrk":  0.0,
+    "w_utrk":  0.0,
+    "w_du":    0.0,
+    "w_u":     0.0,
+    "w_x":     0.0,
+    "lr1":     2e-3,    # was 1e-4 — 20x higher now that physics is OFF
+    "lr2":     5e-4,    # was 5e-5 — 10x higher
 }
 
 
