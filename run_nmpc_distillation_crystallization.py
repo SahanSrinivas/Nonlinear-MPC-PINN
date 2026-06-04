@@ -40,22 +40,23 @@ from agentic_pcgym.data_gen import (
 from agentic_pcgym.evaluator import evaluate_crystallization
 
 
-# PHYSICS-INFORMED + DISTILLATION defaults (v3 architecture).
-# With the bigger network ([128,128,128,128]) and sigmoid-bounded T_c output,
-# we can safely re-enable physics losses at LOW weights. They act as soft
-# regularizers without dominating training; L_nmpc still dominates via
-# w_nmpc=500.
-# T_c output is now guaranteed in [25, 50] by sigmoid → no more LSODA crashes
-# from extreme T_c → physics losses can be evaluated stably.
+# PURE-DISTILLATION defaults — physics losses re-disabled.
+# We tried re-enabling small physics weights (w_ode=0.5) with the bigger
+# network + sigmoid T_c, but L_ode still NaN'd at ep 287. The root cause:
+# the mu values use _log_denorm (10^x), which can blow up even when T_c is
+# bounded — once mu_3 becomes huge, B_0 = mu_3^(k_d/2) overflows, then NaN.
+# Bounding mu values would require log-output (not log-denorm), which is a
+# bigger architectural change. For now: keep pure BC, but with bigger net,
+# sigmoid T_c, and more epochs.
 CRYST_DEFAULT_CFG = {
-    "w_ode":   0.5,     # small physics regularizer
-    "w_ic":    0.1,
-    "w_ytrk":  1.0,     # tracking still useful
-    "w_utrk":  0.05,
-    "w_du":    0.5,     # move suppression
-    "w_u":     2.0,     # input bounds (sigmoid already enforces, so small)
-    "w_x":     0.5,
-    "lr1":     1e-3,    # bigger network → use moderate lr
+    "w_ode":   0.0,     # OFF — log_denorm mu values still unstable
+    "w_ic":    0.0,
+    "w_ytrk":  0.0,
+    "w_utrk":  0.0,
+    "w_du":    0.0,
+    "w_u":     0.0,
+    "w_x":     0.0,
+    "lr1":     1e-3,    # bigger network → moderate lr
     "lr2":     2e-4,
 }
 
