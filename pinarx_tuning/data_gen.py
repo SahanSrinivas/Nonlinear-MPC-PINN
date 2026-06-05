@@ -133,6 +133,7 @@ def gen_grid_train_val_split(qf_levels: int = 10, qc_levels: int = 10,
                                 hold_min: int = 60, hold_max: int = 80,
                                 train_frac: float = 0.6, seed: int = 0,
                                 exclude_corners: bool = True,
+                                n_train_points: int | None = None,
                                 p: CSTRParams | None = None
                                 ) -> tuple[dict, dict]:
     """Dense-grid training data: `qf_levels` x `qc_levels` Cartesian product
@@ -152,6 +153,10 @@ def gen_grid_train_val_split(qf_levels: int = 10, qc_levels: int = 10,
 
     Total trajectory: qf_levels * qc_levels * mean_hold ~ 100 amplitudes x
     70 min = 7000 min. Train = first `train_frac`, val = remainder.
+
+    If `n_train_points` is given, the training trajectory is truncated to
+    EXACTLY that many time steps (the validation set is unchanged). Used
+    for paper Fig 5/6 / Table 4 ablation (200 / 500 / 1000 / 2000 points).
 
     Returns (train_dict, val_dict).
     """
@@ -179,6 +184,9 @@ def gen_grid_train_val_split(qf_levels: int = 10, qc_levels: int = 10,
         t += h
     y = _rollout(u, p=p)
     n_train = int(N * train_frac)
+    # Optional truncation to a specific number of training points (Fig 5/6)
+    if n_train_points is not None:
+        n_train = min(n_train_points, N - 100)   # always leave >=100 val pts
     tr = {"u": u[:n_train], "y": y[:n_train + 1], "dt": DT_DEFAULT,
            "meta": f"grid train N={n_train} of {N} "
                      f"({qf_levels}x{qc_levels} amps, holds {hold_min}-{hold_max}min, seed={seed})"}

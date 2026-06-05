@@ -27,7 +27,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from data_gen import (gen_grid_train_val_split, gen_test1_set, gen_test2_set,
+from data_gen import (gen_grid_train_val_split, gen_train_val_split,
+                        gen_test1_set, gen_test2_set,
                         add_noise, SNR_T6_NOISY_LO, SNR_T6_NOISY_HI)
 from resphys_narx import (ResPhysNARXHparams, ResPhysNARXModel)
 
@@ -55,16 +56,23 @@ def run_trial(hp_overrides: dict | None = None,
                 noise: str | None = None,    # None | "snr35" | "snr100"
                 noise_seed: int = 42,
                 verbose: bool = False,
+                save_figs_dir: str | None = None,
+                protocol: str = "grid",      # "grid" | "aprbs"
                 ) -> dict:
     """Train + evaluate one Res-Phys NARX configuration.
 
     Args:
       hp_overrides: dict of fields to override in ResPhysNARXHparams.
                     Any non-mentioned field keeps its default.
-      qf_levels, qc_levels: dense-grid training resolution.
+      qf_levels, qc_levels: dense-grid training resolution. Ignored when
+                              protocol='aprbs'.
       noise: if 'snr35' or 'snr100', add Gaussian noise to TRAINING and
              TEST trajectories (paper Table 6 protocol). None = noiseless.
       noise_seed: RNG seed for the noise.
+      protocol: 'grid' = our 10x10 dense-grid (open interval, reproducible).
+                'aprbs' = paper-exact (5000-min APRBS, 200-250 min holds,
+                          first 2000 train / last 3000 val). Use for the
+                          apples-to-apples reviewer-proof baseline.
 
     Returns dict with metrics + provenance.
     """
@@ -72,8 +80,11 @@ def run_trial(hp_overrides: dict | None = None,
     seed = hp.seed
 
     # --- Data ---
-    tr, va = gen_grid_train_val_split(qf_levels=qf_levels, qc_levels=qc_levels,
-                                          seed=seed)
+    if protocol == "aprbs":
+        tr, va = gen_train_val_split(N_total=5000, N_train=2000, seed=seed)
+    else:
+        tr, va = gen_grid_train_val_split(qf_levels=qf_levels,
+                                              qc_levels=qc_levels, seed=seed)
     t1, t2 = gen_test1_set(), gen_test2_set()
     if noise is not None:
         snr_vec = SNR_T6_NOISY_LO if noise == "snr35" else SNR_T6_NOISY_HI
@@ -99,8 +110,17 @@ def run_trial(hp_overrides: dict | None = None,
 
     n_params = sum(p.numel() for p in model.net.parameters())
 
+    # Paper-style figures (Fig 3, Fig A.2, Fig A.3) if requested
+    fig_paths = {}
+    if save_figs_dir:
+        from plots import dump_paper_figs
+        noise_label = noise if noise else "noiseless"
+        fig_paths = dump_paper_figs(model, tr, va, t1, t2,
+                                        save_figs_dir, noise_label)
+
     return {
         "hp":           asdict(hp),
+        "protocol":     protocol,
         "qf_levels":    qf_levels,
         "qc_levels":    qc_levels,
         "noise":        noise,
@@ -120,6 +140,7 @@ def run_trial(hp_overrides: dict | None = None,
         # Optimizer minimizes this.
         "objective":  float(0.5 * mae_t1_os + 0.5 * mae_t2_os),
         "paper_ref":  PAPER_REF,
+        "fig_paths":  fig_paths,
     }
 
 
@@ -168,6 +189,9 @@ def _parse_args():
     ap.add_argument("--qf-levels", type=int, default=10)
     ap.add_argument("--qc-levels", type=int, default=10)
     ap.add_argument("--noise",  choices=[None, "snr35", "snr100"], default=None)
+    ap.add_argument("--protocol", choices=["grid", "aprbs"], default="grid",
+                    help="grid (10x10 open-interval, default) | aprbs "
+                         "(paper-exact 5000-min APRBS, 2000/3000 split)")
     # Knobs the optimizer will sweep
     ap.add_argument("--window",     type=int,   default=2)
     ap.add_argument("--hidden",     nargs="+",  type=int,
@@ -182,6 +206,8 @@ def _parse_args():
     ap.add_argument("--residual-l2", type=float, default=0.0)
     ap.add_argument("--rk4-substeps", type=int, default=50)
     ap.add_argument("--out",        default=None, help="JSON path to save result")
+    ap.add_argument("--save-figs",  default=None,
+                    help="Directory to save paper-style figures (Fig 3, A.2, A.3)")
     ap.add_argument("--verbose",    action="store_true")
     return ap.parse_args()
 
@@ -208,5 +234,12 @@ if __name__ == "__main__":
                           qf_levels=args.qf_levels,
                           qc_levels=args.qc_levels,
                           noise=args.noise,
-                          verbose=args.verbose)
+                          verbose=args.verbose,
+                          save_figs_dir=args.save_figs,
+                          protocol=args.protocol)
     print_summary(result, save_to=args.out)
+    if result.get("fig_paths"):
+        print()
+        print("Saved figures:")
+        for name, path in result["fig_paths"].items():
+            print(f"  {name:<10} -> {path}")

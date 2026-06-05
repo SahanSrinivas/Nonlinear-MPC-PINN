@@ -334,6 +334,7 @@ def tune(study_name: str = "resphys_default",
            n_trials: int = 50,
            mode: str = "none",          # none | llambo | lean3
            noise: str | None = None,    # None | "snr35" | "snr100"
+           protocol: str = "grid",      # "grid" | "aprbs"
            llm_ratio: float = 0.3,      # fraction of trials driven by LLM
            qf_levels: int = 10, qc_levels: int = 10,
            seed: int = 0,
@@ -352,7 +353,7 @@ def tune(study_name: str = "resphys_default",
             f.write(line + "\n")
 
     log(f"=== LEAN tuner :: study={study_name} mode={mode} n_trials={n_trials} "
-        f"noise={noise} ===")
+        f"noise={noise} protocol={protocol} ===")
 
     # ----- Sampler: TPE with optional LLM warm-start -----
     sampler = TPESampler(seed=seed)
@@ -370,7 +371,7 @@ def tune(study_name: str = "resphys_default",
         try:
             r = run_trial(hp_overrides=overrides,
                             qf_levels=qf_levels, qc_levels=qc_levels,
-                            noise=noise)
+                            noise=noise, protocol=protocol)
         except Exception as e:
             log(f"  trial failed: {e}\n{traceback.format_exc()[:400]}")
             return 1.0
@@ -479,6 +480,10 @@ if __name__ == "__main__":
                     default="none")
     ap.add_argument("--noise",      choices=[None, "snr35", "snr100"],
                     default=None)
+    ap.add_argument("--protocol",   choices=["grid", "aprbs"], default="grid",
+                    help="grid (10x10 open-interval, default) | aprbs "
+                         "(paper-exact 5000-min APRBS, 2000/3000 split). "
+                         "Use 'aprbs' for the apples-to-apples reviewer-proof baseline.")
     ap.add_argument("--llm-ratio",  type=float, default=0.3)
     ap.add_argument("--qf-levels",  type=int, default=10)
     ap.add_argument("--qc-levels",  type=int, default=10)
@@ -487,6 +492,7 @@ if __name__ == "__main__":
                                                 else "cpu")
     args = ap.parse_args()
     best = tune(study_name=args.study_name, n_trials=args.n_trials,
-                  mode=args.mode, noise=args.noise, llm_ratio=args.llm_ratio,
+                  mode=args.mode, noise=args.noise, protocol=args.protocol,
+                  llm_ratio=args.llm_ratio,
                   qf_levels=args.qf_levels, qc_levels=args.qc_levels,
                   seed=args.seed, device=args.device)
