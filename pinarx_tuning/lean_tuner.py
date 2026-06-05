@@ -127,14 +127,22 @@ def sample_from_space(trial: optuna.Trial) -> dict:
 # ============================================================================
 # LLM clients - lazy-imported so the file works without LLM keys
 # ============================================================================
+# Hard timeout on every LLM call (default 5 min) so a flaky API call can
+# never hang the tuning loop indefinitely. Override with the env var
+# LLM_CALL_TIMEOUT_S if you need a longer ceiling.
+_LLM_TIMEOUT_S = float(os.environ.get("LLM_CALL_TIMEOUT_S", "300.0"))
+
+
 def _anthropic_client():
     import anthropic
-    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
+                                  timeout=_LLM_TIMEOUT_S)
 
 
 def _openai_client():
     import openai
-    return openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"],
+                            timeout=_LLM_TIMEOUT_S)
 
 
 def _claude_call(prompt: str, system: str = "",
@@ -427,23 +435,31 @@ def tune(study_name: str = "resphys_default",
                 study.optimize(objective, n_trials=chunk)
                 n_done += chunk
                 if n_done >= n_trials: break
-            # LLM agent loop
+            # LLM agent loop. If anything in here fails or times out, log it
+            # and fall back to TPE for this round.
             if results:
-                diag = diagnostic_agent(results[-1],
-                                          mock=not bool(os.environ.get("OPENAI_API_KEY")))
-                strat = strategy_agent(diag, results, last_hp,
-                                          mock=not bool(os.environ.get("ANTHROPIC_API_KEY")))
-                cfg = tuning_agent(strat["config"], last_hp)
-                log(f"  agent: diag={diag['failure_mode']}  "
-                      f"strat=\"{strat['rationale'][:80]}...\"")
                 try:
-                    enq = _filter_to_search_space(cfg)
-                    if enq:
-                        study.enqueue_trial(enq)
-                    else:
-                        log(f"  agent: no valid params to enqueue")
+                    diag = diagnostic_agent(results[-1],
+                                              mock=not bool(os.environ.get("OPENAI_API_KEY")))
+                    strat = strategy_agent(diag, results, last_hp,
+                                              mock=not bool(os.environ.get("ANTHROPIC_API_KEY")))
+                    cfg = tuning_agent(strat["config"], last_hp)
+                    log(f"  agent: diag={diag['failure_mode']}  "
+                          f"strat=\"{strat['rationale'][:80]}...\"")
                 except Exception as e:
-                    log(f"  agent enqueue failed: {e}")
+                    log(f"  agent failed ({type(e).__name__}: {str(e)[:120]}); "
+                          f"continuing on TPE only")
+                    cfg = None
+                    strat = {"rationale": f"agent error: {e}", "config": {}}
+                if cfg is not None:
+                    try:
+                        enq = _filter_to_search_space(cfg)
+                        if enq:
+                            study.enqueue_trial(enq)
+                        else:
+                            log(f"  agent: no valid params to enqueue")
+                    except Exception as e:
+                        log(f"  agent enqueue failed: {e}")
             study.optimize(objective, n_trials=1)
             # Mark the most recent trial as LLM-driven for the log
             if results:
