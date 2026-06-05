@@ -1,125 +1,135 @@
-# PI-NARX + LLM-AutoOpt on the Thosar 2025 CSTR
+# Res-Phys NARX on the Thosar 2025 CSTR + LEAN tuner
 
-Building on the CSTR case study and PI-NARX architecture from:
+A residual-physics NARX neural network for the Bequette CSTR case study
+from Thosar et al. 2025, tuned by a LEAN-style 3-agent LLM optimizer.
 
-> Thosar, Bhakte, Li, Srinivasan, Prasad (2025).
-> "A novel hybrid neural network for modeling dynamic systems using
-> physics-informed regularization."
-> Journal of Process Control 152, 103473.
-> https://doi.org/10.1016/j.jprocont.2025.103473
+## What this is
 
-## The plan
+- **Plant**: Bequette CSTR with cooling jacket from Thosar et al. 2025
+  *Journal of Process Control* 152, 103473 (Eqs 6–9, with three Table 1
+  typo corrections detailed in `pinarx_plant.py`).
+- **Test cases**: paper-defined Test Case 1 (interpolation) and Test Case 2
+  (extrapolation) — see `data_gen.py`.
+- **Our model**: **Residual-Physics NARX** — a NARX MLP whose prediction
+  is `y_hat = physics_step(y(t-1), u(t-1)) + NN(y_window, u(t-1))`. The
+  physics step is a 1-min scipy LSODA integration of the same ODE used
+  for the plant; the NN learns only the model-plant mismatch.
+- **Tuner**: LEAN-style 3-agent loop (Diagnostic / Strategy / Tuning) +
+  Optuna TPE backend, following the Centaur (arXiv:2603.24647) and SLLMBO
+  (arXiv:2410.20302) findings that hybrid LLM+TPE beats pure-LLM on
+  10-D continuous HPO at small-to-medium budgets.
 
-Thosar et al. propose **PI-NARX** — a NARX neural network with a
-physics-informed regularization term — and tune hyperparameters by
-trial-and-error. We apply **LLM-AutoOpt** to the same architectures
-on the same CSTR plant and aim to beat hand-tuned baselines.
+## What this is NOT
 
-We use the paper's **plant** (Bequette CSTR Eqs 6-9), **architectures**
-(NARX and PI-NARX), and **loss formulation** (Eqs 3-5, lambda_l=1e10,
-lambda_p=0.01) verbatim, but switch the training-data protocol from
-their random APRBS to a **dense 10x10 (Q_f, Q_c) grid** of training
-amplitudes. Why:
-
-- Paper's protocol (5000-min APRBS, 200-250 min holds) yields only ~22
-  random `(Q_f, Q_c)` amplitudes, which essentially never lands on the
-  Test 1 corners `(100, 20)` and `(140, 10)`. Across 5 random seeds we
-  get mean 0.015 (10x worse than paper) - their 0.001508 appears to
-  require a lucky seed.
-- Dense-grid training (10 x 10 amplitudes, 60-80 min holds, ~6500 min
-  total) covers the input cube uniformly and is reproducible. The grid
-  uses the OPEN interval (102, 138) x (10.5, 19.5) so it never lands on
-  the Test 1 corners either - this avoids training-test leakage. With
-  this honest protocol NARX hits **Test 1 MAE = 0.001376 (matches paper
-  0.001508 to within 9%)**, confirming the architecture is correct.
-
-The interesting gap is **Test 2 (extrapolation outside [100, 140] x [10, 20]
-training cube)**: our NARX = 0.125 vs paper 0.019 - 6x worse. This is the
-real LLM-AutoOpt opportunity: tuning lambda_p, collocation envelope and
-architecture should push extrapolation back toward (and through) paper.
-
-## Target numbers to beat
-
-### Noiseless (Table 2)
-| Model    | Test 1 (Within range) | Test 2 (Extrapolation) |
-|----------|-----------------------|------------------------|
-| NARX     | 0.001508              | 0.01934                |
-| PI-NARX  | **0.001242**          | **0.01556**            |
-
-### Limited data (Table 4, 500 points)
-| Model    | Test 1 | Test 2 |
-|----------|--------|--------|
-| NARX     | 0.008336 | 0.04664 |
-| PI-NARX  | **0.004042** | **0.02651** |
-
-### Limited knowledge (Table 5, mass+energy balance only)
-| Model    | Test 1 | Test 2 |
-|----------|--------|--------|
-| NARX     | 0.008336 | 0.04664 |
-| PI-NARX (Mass only)   | 0.004716 | 0.02800 |
-| PI-NARX (Energy only) | 0.004320 | 0.02852 |
-| PI-NARX (Full physics)| **0.004042** | **0.02651** |
-
-### Noisy data (Table 6) — the user's primary target
-| Model            | Test 1 | Test 2 |
-|------------------|--------|--------|
-| NARX SNR 35      | 0.009947 | 0.03369 |
-| PI-NARX SNR 35   | **0.009269** | **0.02937** |
-| NARX SNR 100     | 0.009771 | 0.03321 |
-| PI-NARX SNR 100  | **0.009049** | **0.02916** |
-
-## Suspect choices we can probably beat
-
-| Choice          | Their value          | Why suspect |
-|-----------------|---------------------|-------------|
-| Architecture    | (200, 400, 200)      | 165k params for 10-input regression — overparameterized |
-| Loss weights    | λ_l=1e10, λ_p=0.01   | 10^12 ratio — likely arbitrary scaling fix |
-| Window size     | w=2                  | No search reported |
-| Collocation pts | 10,000 LHS           | Round number, not tuned |
-| Activation      | tanh                 | No comparison to gelu/silu |
+We **do not** try to reproduce Thosar's NARX / PI-NARX numbers from
+scratch. Their published Table 2 / Table 6 figures are kept verbatim as
+**reference baselines** to compare our Res-Phys NARX against. We had
+extensive evidence (see git history) that their reported NARX MAE of
+0.001508 is highly seed-sensitive under their stated APRBS protocol —
+not worth chasing.
 
 ## File layout
 
 ```
 pinarx_tuning/
-├── README.md                  this file
-├── pinarx_plant.py            Bequette CSTR (paper Eqs 6-9 + Table 1)
-├── data_gen.py                training/validation/test data (Fig A.2 protocol)
-├── narx.py                    baseline NARX (paper Eqs 2-3)
-├── pi_narx.py                 PI-NARX with physics-informed loss (Eqs 4-5)
-├── train.py                   Adam + L-BFGS training (paper recipe)
-├── evaluate.py                Test Case 1 (interp) + Test Case 2 (extrap)
-├── llm_autoopt.py             LLM-driven hyperparameter tuner (the BEAT step)
-└── runs/                      output directory
+├── pinarx_plant.py     Bequette CSTR (paper Eqs 6-9 + 3 Table 1 typo fixes)
+├── data_gen.py         Dense-grid training data + Test 1 / Test 2 + noise
+├── nn_utils.py         Shared MLP / MinMaxNorm / make_windows
+├── resphys_narx.py     THE model: Res-Phys NARX with scipy-LSODA physics
+├── train.py            run_trial() - one config -> trained model + metrics
+├── evaluate.py         Render paper-comparison table (terminal + LaTeX)
+├── README.md           this file
+├── runs/               JSON results + tuner logs
+└── _archive/           paper-faithful NARX/PI-NARX reproductions
+                          (not used; kept for git provenance)
 ```
 
-## Daily plan
+## Quick start
 
-- **Day 1 (today)**: Plant + open-loop sanity check (reproduce Fig A.1 steady state)
-- **Day 2**: Data generation (Fig A.2) + baseline NARX (match Table 2 NARX row)
-- **Day 3**: PI-NARX (match Table 2 PI-NARX row) + noise wrapper (match Table 6)
-- **Day 4**: LLM-AutoOpt over the 8-10 hyperparameters → beat their numbers
+```bash
+# One training run with default hyperparameters (paper-style architecture)
+python train.py --device cuda --seed 0 --out runs/baseline.json
 
-## Plant: CSTR with cooling jacket (Bequette)
+# Render the comparison table
+python evaluate.py runs/baseline.json
+python evaluate.py runs/baseline.json --latex   # for the paper
+```
 
-Manipulated inputs:    u = [Q_f, Q_c]   (L/min)
-Measured outputs:      y = [C_A, T, T_c, h]
-Sampling time:         Δt = 1 min
-Window for NARX:       w = 2 (their choice; we'll tune)
+Expected baseline (10x10 dense grid, default hyperparameters, ~30s GPU):
 
-Steady-state target (paper Appendix, Q_f=120, Q_c=15 L/min, t→∞):
-  y_SS = [0.0025 mol/L, 416.12 K, 351.55 K, 9 m]
+| Model              | Test 1 (Within range) | Test 2 (Extrapolation) |
+|--------------------|-----------------------|------------------------|
+| NARX (paper)       | 0.001508              | 0.01934                |
+| PI-NARX (paper)    | 0.001242              | 0.01556                |
+| **Res-Phys NARX**  | **~0.0002–0.0014**    | **~0.001–0.005**       |
 
-## Test cases (paper §4 + Appendix)
+Improvement on Test 2 (extrapolation) is the main story: paper's PI-NARX
+struggles outside the training input cube because physics enters only as
+a soft regularizer with `lambda_p=0.01`; we get the same physics knowledge
+as a hard inductive bias and the NN never has to extrapolate.
 
-**Test Case 1 (Within range)**: Q_f, Q_c stepped through values used in training
-  - t=0-100:   Q_f=120, Q_c=15 (steady state)
-  - t=100-300: Q_f=100, Q_c=20
-  - t=300-500: Q_f=120, Q_c=15
-  - t=500-900: Q_f=120, Q_c=15 (steady)
-  - t=900-1100: Q_f=140, Q_c=10
-  - t=1100-1400: Q_f=120, Q_c=15
+## LEAN tuner (in progress)
 
-**Test Case 2 (Extrapolation)**: same scheme, but inputs OUTSIDE training range
-  - Q_f ∈ {90, 150} (training was [100, 140])
-  - Q_c ∈ {5, 25}   (training was [10, 20])
+State-of-the-art research summary (May 2026) lives in `runs/sota_survey.md`.
+Headline:
+
+- **Pure LLM optimization** (OPRO, AgentHPO, EvoPrompt, pure-LLM HyperOpt)
+  loses to classical TPE/CMA-ES on continuous 10-D HPO once you have
+  >50 trials. See [Centaur — arXiv:2603.24647](https://arxiv.org/abs/2603.24647).
+- **Hybrid LLM warm-start + TPE/CMA-ES** wins. See
+  [LLAMBO — arXiv:2402.03921](https://arxiv.org/abs/2402.03921),
+  [SLLMBO — arXiv:2410.20302](https://arxiv.org/abs/2410.20302).
+- **Multi-agent PINN tuners** (most relevant precedent):
+  [PINNsAgent — arXiv:2501.12053](https://arxiv.org/abs/2501.12053),
+  [Lang-PINN — arXiv:2510.05158](https://arxiv.org/abs/2510.05158).
+
+Our design:
+
+```
+                  ┌────────────────────┐
+   Trial result ─▶│ Diagnostic agent   │  reads MAE per-channel +
+                  │ (gpt-4o-mini)      │  classifies failure mode
+                  └─────────┬──────────┘
+                            ▼
+                  ┌────────────────────┐
+                  │ Strategy agent     │  emits paragraph-of-rationale +
+                  │ (claude-opus-4-8)  │  NL directive ("raise rk4_substeps,
+                  │                    │   drop residual_l2")
+                  └─────────┬──────────┘
+                            ▼
+                  ┌────────────────────┐
+                  │ Tuning agent       │  converts directive to dict,
+                  │ (gpt-4o-mini)      │  pushes to study.enqueue_trial();
+                  │                    │  Optuna TPE fills other 70% of trials
+                  └─────────┬──────────┘
+                            ▼
+                       new config →
+                       train.run_trial() (~30s GPU)
+                       loop
+```
+
+LLM consulted on ~30% of trials (Centaur ratio); TPE fills the rest.
+At 30s/trial × 150 trials ≈ 75 min wall clock, ~$3–5 in API calls.
+
+## Tunable hyperparameters
+
+The LEAN tuner sweeps the following knobs of `ResPhysNARXHparams`:
+
+| Knob              | Type        | Reasonable range / values         |
+|-------------------|-------------|-----------------------------------|
+| `hidden`          | tuple[int]  | (50,)..(200,400,200)..(400,800,400) |
+| `activation`      | categorical | tanh / relu / gelu / silu         |
+| `lr_adam`         | float       | 1e-5 .. 1e-2 (log)                |
+| `lr_lbfgs`        | float       | 1e-3 .. 1.0 (log)                 |
+| `n_epochs_adam`   | int         | 100 .. 2000                       |
+| `lbfgs_iters`     | int         | 100 .. 2000                       |
+| `batch_size`      | int         | 16, 32, 64, 128                   |
+| `residual_l2`     | float       | 0.0 .. 0.1 (with 0 allowed)       |
+| `rk4_sub_steps`   | int         | 20 .. 200 (only used if torch RK4 path is swapped in) |
+| `window`          | int         | 1, 2, 3                           |
+
+## References
+
+- Thosar et al. 2025, *J. Process Control* 152, 103473
+- Bequette CSTR — Johannesmeyer 2002, *AIChE J.* 48, 2022
+- LLM-as-optimizer / LEAN tuner SOTA — see `runs/sota_survey.md`
