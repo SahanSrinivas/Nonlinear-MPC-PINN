@@ -1,23 +1,32 @@
-"""LEAN 3-agent + Optuna TPE tuner for Res-Phys NARX.
+"""LLMAgentOpt - 3-agent + Optuna TPE hyperparameter tuner for Res-Phys NARX.
 
-Implements the recommendation from runs/sota_survey.md:
-  - Optuna TPE fills the majority (~70%) of trials.
-  - On the remaining ~30%, an LLM panel proposes the config:
-      Diagnostic agent (gpt-4o-mini)   - classifies last-trial failure mode
-      Strategy agent   (claude opus)   - emits NL directive
-      Tuning agent     (gpt-4o-mini)   - converts directive to a config dict
-                                            and enqueues it into the study.
-  - This matches Centaur (arXiv:2603.24647) and SLLMBO (arXiv:2410.20302).
+A physics-aware hyperparameter optimizer that pairs Optuna TPE (the standard
+Bayesian-optimization backbone) with a three-agent LLM panel:
 
-Modes:
-  --mode none     pure TPE, no LLM (dev / baseline)
-  --mode llambo   LLM warm-start only (5 LLM-proposed configs then pure TPE)
-  --mode lean3    full 3-agent loop (production)
+    Diagnostic agent (gpt-4o-mini)   - classifies last-trial failure mode
+                                            using a physics-aware taxonomy
+                                            (extrap_drift, residual_too_strong,
+                                             residual_too_weak, physics_dominant,
+                                             underfitting, overfitting, ok)
+    Strategy agent   (claude opus)   - emits NL rationale + JSON config delta
+    Tuning agent     (deterministic) - clamps to search space + enqueues
+
+Optuna TPE drives ~70% of trials; the LLM panel drives the remaining ~30%,
+matching Centaur (arXiv:2603.24647) and SLLMBO (arXiv:2410.20302).
+
+Modes (CLI):
+  --mode none           pure TPE, no LLM (dev / baseline)
+  --mode llambo         LLM warm-start only (3 configs then pure TPE)
+  --mode llm_agent_opt  full 3-agent loop (production)   [alias: 'lean3']
 
 Outputs (per study):
-  runs/<study_name>/results.json           list of trial dicts (config + metrics + LLM rationale)
-  runs/<study_name>/tuner.log              human-readable log
-  runs/<study_name>/best.json              best trial + its config
+  runs/<study_name>/results.json   list of trial dicts (config + metrics + LLM rationale)
+  runs/<study_name>/tuner.log      human-readable log
+  runs/<study_name>/best.json      best trial + its config
+
+This module was originally named `lean_tuner.py`. It is preserved here under
+that filename for backward compatibility with existing run scripts. New code
+should import from `llm_agent_opt` (a thin alias that re-exports everything).
 """
 from __future__ import annotations
 
@@ -340,7 +349,7 @@ def tuning_agent(strategy_config: dict, last_hp: dict) -> dict:
 # ============================================================================
 def tune(study_name: str = "resphys_default",
            n_trials: int = 50,
-           mode: str = "none",          # none | llambo | lean3
+           mode: str = "none",          # none | llambo | llm_agent_opt | lean3 (alias)
            noise: str | None = None,    # None | "snr35" | "snr100"
            protocol: str = "grid",      # "grid" | "aprbs"
            llm_ratio: float = 0.3,      # fraction of trials driven by LLM
@@ -349,7 +358,10 @@ def tune(study_name: str = "resphys_default",
            device: str = "cuda",
            out_root: str = "runs",
            ) -> dict:
-    """Run a tuning study. Returns the best trial dict."""
+    """Run an LLMAgentOpt tuning study. Returns the best trial dict."""
+    # Accept "lean3" as a backward-compat alias for "llm_agent_opt"
+    if mode == "lean3":
+        mode = "llm_agent_opt"
     out_dir = Path(out_root) / study_name
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "tuner.log"
@@ -360,7 +372,7 @@ def tune(study_name: str = "resphys_default",
         with open(log_path, "a") as f:
             f.write(line + "\n")
 
-    log(f"=== LEAN tuner :: study={study_name} mode={mode} n_trials={n_trials} "
+    log(f"=== LLMAgentOpt :: study={study_name} mode={mode} n_trials={n_trials} "
         f"noise={noise} protocol={protocol} ===")
 
     # ----- Sampler: TPE with optional LLM warm-start -----
@@ -397,7 +409,7 @@ def tune(study_name: str = "resphys_default",
         return r["objective"]
 
     # ----- LLM warm-start (LLAMBO-style) -----
-    if mode in ("llambo", "lean3"):
+    if mode in ("llambo", "llm_agent_opt"):
         log(f"  warm-start: requesting 3 LLM-proposed configs")
         # Use the heuristic mocks for warm-start to avoid needing an LLM key
         # just to run the search. If keys are set, switch to real LLM.
@@ -422,8 +434,8 @@ def tune(study_name: str = "resphys_default",
                 log(f"  warm-start {k}: enqueue failed: {e}")
 
     # ----- Main optimization loop -----
-    # If mode='lean3', after every ceil(1/llm_ratio) TPE trials, run the agent loop.
-    if mode != "lean3":
+    # If mode='llm_agent_opt', after every ceil(1/llm_ratio) TPE trials, run the agent loop.
+    if mode != "llm_agent_opt":
         study.optimize(objective, n_trials=n_trials)
     else:
         n_done = 0
@@ -492,8 +504,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--study-name", default="resphys_default")
     ap.add_argument("--n-trials",   type=int, default=50)
-    ap.add_argument("--mode",       choices=["none", "llambo", "lean3"],
-                    default="none")
+    ap.add_argument("--mode",       choices=["none", "llambo",
+                                                  "llm_agent_opt", "lean3"],
+                    default="none",
+                    help="none=pure TPE; llambo=warm-start only; "
+                         "llm_agent_opt=full 3-agent loop (recommended). "
+                         "'lean3' is kept as a backward-compat alias.")
     ap.add_argument("--noise",      choices=[None, "snr35", "snr100"],
                     default=None)
     ap.add_argument("--protocol",   choices=["grid", "aprbs"], default="grid",

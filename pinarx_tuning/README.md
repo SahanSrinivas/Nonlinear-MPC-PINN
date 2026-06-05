@@ -1,7 +1,8 @@
-# Res-Phys NARX on the Thosar 2025 CSTR + LEAN tuner
+# Res-Phys NARX on the Thosar 2025 CSTR + LLMAgentOpt
 
 A residual-physics NARX neural network for the Bequette CSTR case study
-from Thosar et al. 2025, tuned by a LEAN-style 3-agent LLM optimizer.
+from Thosar et al. 2025, tuned by **LLMAgentOpt** - our 3-agent +
+Optuna TPE hybrid hyperparameter optimizer.
 
 ## What this is
 
@@ -14,10 +15,12 @@ from Thosar et al. 2025, tuned by a LEAN-style 3-agent LLM optimizer.
   is `y_hat = physics_step(y(t-1), u(t-1)) + NN(y_window, u(t-1))`. The
   physics step is a 1-min scipy LSODA integration of the same ODE used
   for the plant; the NN learns only the model-plant mismatch.
-- **Tuner**: LEAN-style 3-agent loop (Diagnostic / Strategy / Tuning) +
-  Optuna TPE backend, following the Centaur (arXiv:2603.24647) and SLLMBO
-  (arXiv:2410.20302) findings that hybrid LLM+TPE beats pure-LLM on
-  10-D continuous HPO at small-to-medium budgets.
+- **Tuner**: **LLMAgentOpt** - 3-agent loop (Diagnostic / Strategy /
+  Tuning) wrapped around Optuna TPE. Follows the Centaur (arXiv:2603.24647)
+  and SLLMBO (arXiv:2410.20302) recommendation that hybrid LLM+TPE beats
+  pure-LLM on 10-D continuous HPO. Distinguishing feature: a
+  **physics-aware failure taxonomy** (extrap_drift, residual_too_strong,
+  residual_too_weak, physics_dominant) that generic LLM optimizers don't have.
 
 ## What this is NOT
 
@@ -38,6 +41,8 @@ pinarx_tuning/
 ├── resphys_narx.py     THE model: Res-Phys NARX with scipy-LSODA physics
 ├── train.py            run_trial() - one config -> trained model + metrics
 ├── evaluate.py         Render paper-comparison table (terminal + LaTeX)
+├── llm_agent_opt.py    Canonical entry point for LLMAgentOpt tuner
+├── lean_tuner.py       Same code (backward-compat name; still works)
 ├── README.md           this file
 ├── runs/               JSON results + tuner logs
 └── _archive/           paper-faithful NARX/PI-NARX reproductions
@@ -68,7 +73,7 @@ struggles outside the training input cube because physics enters only as
 a soft regularizer with `lambda_p=0.01`; we get the same physics knowledge
 as a hard inductive bias and the NN never has to extrapolate.
 
-## LEAN tuner (in progress)
+## LLMAgentOpt tuner
 
 State-of-the-art research summary (May 2026) lives in `runs/sota_survey.md`.
 Headline:
@@ -110,6 +115,26 @@ Our design:
 
 LLM consulted on ~30% of trials (Centaur ratio); TPE fills the rest.
 At 30s/trial × 150 trials ≈ 75 min wall clock, ~$3–5 in API calls.
+
+### CLI
+
+```bash
+# Recommended (new name)
+python llm_agent_opt.py --study-name noiseless --n-trials 30 \
+    --mode llm_agent_opt --device cuda
+
+# Backward compat (legacy script, legacy mode name - both still work)
+python lean_tuner.py --study-name noiseless --n-trials 30 \
+    --mode lean3 --device cuda
+```
+
+### Modes
+
+| `--mode` | Behavior |
+|---|---|
+| `none` | Pure Optuna TPE (no LLM). Use for the LLMAgentOpt-vs-TPE ablation. |
+| `llambo` | LLM picks 3 warm-start configs, then pure TPE. LLAMBO-style baseline. |
+| `llm_agent_opt` | Full 3-agent loop + TPE (production). Alias: `lean3`. |
 
 ## Tunable hyperparameters
 
