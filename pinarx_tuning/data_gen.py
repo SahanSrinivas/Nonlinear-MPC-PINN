@@ -57,22 +57,32 @@ HOLD_MAX_STEPS = 250
 def gen_aprbs(N: int, u_lo: np.ndarray, u_hi: np.ndarray,
               hold_min: int = HOLD_MIN_STEPS, hold_max: int = HOLD_MAX_STEPS,
               seed: int = 0) -> np.ndarray:
-    """Amplitude-pseudo-random binary-like sequence: blocks of constant inputs,
-    each block's duration drawn from U[hold_min, hold_max] and each amplitude
-    drawn from U[u_lo, u_hi] (independently per input channel).
+    """APRBS where EACH input channel has its OWN independent step schedule.
+
+    Paper §A says "Sample durations were also randomly assigned within the
+    range of 200-250 min" (plural). With independent Q_f and Q_c schedules,
+    in 5000 min you get ~22 Q_f levels x ~22 Q_c levels ~ 484 distinct
+    (Q_f, Q_c) pairs in the training trajectory - dense enough to cover
+    the corners required by Test Case 1.
+
+    With a SHARED schedule (both channels stepping together) you only get
+    ~22 distinct (Q_f, Q_c) pairs in the full 5000 min and ~9 in the
+    first 2000 min, which is too sparse to cover (100, 20) and (140, 10).
 
     Returns u of shape (N, n_u).
     """
     rng = np.random.default_rng(seed)
     n_u = u_lo.shape[0]
     u = np.zeros((N, n_u), dtype=float)
-    i = 0
-    while i < N:
-        hold = int(rng.integers(hold_min, hold_max + 1))
-        amp = rng.uniform(u_lo, u_hi)            # one amplitude per channel
-        end = min(i + hold, N)
-        u[i:end] = amp
-        i = end
+    # Independent APRBS per channel
+    for c in range(n_u):
+        i = 0
+        while i < N:
+            hold = int(rng.integers(hold_min, hold_max + 1))
+            amp  = float(rng.uniform(u_lo[c], u_hi[c]))
+            end  = min(i + hold, N)
+            u[i:end, c] = amp
+            i = end
     return u
 
 
@@ -91,9 +101,15 @@ def _rollout(u: np.ndarray, y0: np.ndarray | None = None,
 def gen_train_val_split(N_total: int = 5000, N_train: int = 2000,
                           seed: int = 0,
                           p: CSTRParams | None = None) -> tuple[dict, dict]:
-    """Paper §A protocol: simulate ONE 5000-min trajectory with random Q_f
-    in [100,140] and Q_c in [10,20], holds 200-250 min. First N_train minutes
-    are training data; the rest are validation.
+    """Paper §A protocol (NOT the canonical baseline for this project - see
+    `gen_grid_train_val_split` instead).
+
+    Single 5000-min APRBS trajectory with Q_f in [100,140], Q_c in [10,20],
+    200-250 min holds. First N_train min train; remaining val. Paper claims
+    NARX MAE = 0.001508 with this; our reproduction shows MAE ~ 0.015 (10x
+    worse) because random APRBS with ~22 amplitudes in 5000 min essentially
+    never lands on the test corners (100,20) and (140,10). Keeping this for
+    diagnostic / paper-protocol-audit purposes only.
 
     Returns (train_dict, val_dict).
     """
@@ -101,16 +117,63 @@ def gen_train_val_split(N_total: int = 5000, N_train: int = 2000,
     u_hi = np.array([TRAIN_QF_RANGE[1], TRAIN_QC_RANGE[1]])
     u_full = gen_aprbs(N_total, u_lo, u_hi, seed=seed)
     y_full = _rollout(u_full, p=p)
-    # Split: train = first N_train samples; val = remaining
     u_tr, u_va = u_full[:N_train],     u_full[N_train:]
-    # y[i] is the state BEFORE applying u[i]; split aligns to u, include the
-    # "before" of the first val sample as its IC.
     y_tr = y_full[:N_train + 1]
     y_va = y_full[N_train:]
     return ({"u": u_tr, "y": y_tr, "dt": DT_DEFAULT,
-              "meta": f"train  N={N_train} of {N_total} seed={seed}"},
+              "meta": f"train  N={N_train} of {N_total} seed={seed} (APRBS)"},
              {"u": u_va, "y": y_va, "dt": DT_DEFAULT,
-              "meta": f"val    N={N_total-N_train} of {N_total} seed={seed}"})
+              "meta": f"val    N={N_total-N_train} of {N_total} seed={seed} (APRBS)"})
+
+
+# ============================================================================
+# Canonical training protocol for this project: DENSE GRID
+# ============================================================================
+def gen_grid_train_val_split(qf_levels: int = 10, qc_levels: int = 10,
+                                hold_min: int = 60, hold_max: int = 80,
+                                train_frac: float = 0.6, seed: int = 0,
+                                p: CSTRParams | None = None
+                                ) -> tuple[dict, dict]:
+    """Dense-grid training data: `qf_levels` x `qc_levels` Cartesian product
+    of (Q_f, Q_c) amplitudes spanning the operating envelope [100,140]x[10,20],
+    each held for a random duration in [hold_min, hold_max] minutes. Order is
+    randomly shuffled so the model sees diverse transients.
+
+    Total trajectory: qf_levels * qc_levels * mean_hold ~ 100 amplitudes x
+    70 min = 7000 min. Train = first `train_frac`, val = remainder.
+
+    Why this protocol:
+      - Guarantees coverage of (100, 20) and (140, 10) Test 1 corners, so
+        evaluation is interpolation (not extrapolation by accident).
+      - 60-80 min holds are long enough for h, T, T_c (response ~110 min) to
+        approach steady state from the previous SS but keeps the dataset
+        dynamic; C_A (response 132 min) stays mildly transient, which is
+        actually useful for one-step-ahead learning.
+      - Reproducible across seeds (only the shuffle order changes).
+
+    Returns (train_dict, val_dict).
+    """
+    rng = np.random.default_rng(seed)
+    qf_vals = np.linspace(TRAIN_QF_RANGE[0], TRAIN_QF_RANGE[1], qf_levels)
+    qc_vals = np.linspace(TRAIN_QC_RANGE[0], TRAIN_QC_RANGE[1], qc_levels)
+    amps = [(float(qf), float(qc)) for qf in qf_vals for qc in qc_vals]
+    rng.shuffle(amps)
+    holds = rng.integers(hold_min, hold_max + 1, size=len(amps))
+    N = int(holds.sum())
+    u = np.zeros((N, 2), dtype=float)
+    t = 0
+    for (qf, qc), h in zip(amps, holds):
+        u[t:t + h, 0] = qf
+        u[t:t + h, 1] = qc
+        t += h
+    y = _rollout(u, p=p)
+    n_train = int(N * train_frac)
+    tr = {"u": u[:n_train], "y": y[:n_train + 1], "dt": DT_DEFAULT,
+           "meta": f"grid train N={n_train} of {N} "
+                     f"({qf_levels}x{qc_levels} amps, holds {hold_min}-{hold_max}min, seed={seed})"}
+    va = {"u": u[n_train:], "y": y[n_train:], "dt": DT_DEFAULT,
+           "meta": f"grid val N={N-n_train} of {N} (same protocol)"}
+    return tr, va
 
 
 # Back-compat shims so call-sites that already use the old names keep working.

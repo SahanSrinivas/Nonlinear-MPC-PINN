@@ -482,25 +482,36 @@ def train_and_eval_narx(traj_train, traj_val, traj_test1, traj_test2,
 # ============================================================================
 if __name__ == "__main__":
     import argparse, torch as _t
-    from data_gen import (gen_train_val_split, gen_test1_set, gen_test2_set)
+    from data_gen import (gen_train_val_split, gen_grid_train_val_split,
+                            gen_test1_set, gen_test2_set)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda" if _t.cuda.is_available() else "cpu")
     ap.add_argument("--seed",   type=int, default=0)
-    ap.add_argument("--n-total",type=int, default=5000)
-    ap.add_argument("--n-train",type=int, default=2000)
+    ap.add_argument("--protocol", choices=["grid", "paper-aprbs"], default="grid",
+                    help="Training data protocol. 'grid' (default): 10x10 dense "
+                         "(Q_f, Q_c) grid with 60-80 min holds, covers test corners "
+                         "by construction. 'paper-aprbs': paper's exact APRBS "
+                         "(reproduces paper-protocol but very seed-sensitive).")
+    ap.add_argument("--qf-levels", type=int, default=10)
+    ap.add_argument("--qc-levels", type=int, default=10)
     ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--lbfgs",  type=int, default=1000)
     args = ap.parse_args()
 
     print("=" * 70)
-    print("NARX baseline (paper Table 2 target: Test1=0.001508, Test2=0.01934)")
-    print(f"device = {args.device}, seed = {args.seed}")
+    print(f"NARX baseline (paper Table 2 reference: Test1=0.001508, Test2=0.01934)")
+    print(f"device={args.device}, seed={args.seed}, protocol={args.protocol}")
     print("=" * 70)
 
     print("Generating data...")
-    tr, va = gen_train_val_split(N_total=args.n_total, N_train=args.n_train,
-                                    seed=args.seed)
+    if args.protocol == "grid":
+        tr, va = gen_grid_train_val_split(qf_levels=args.qf_levels,
+                                              qc_levels=args.qc_levels,
+                                              seed=args.seed)
+    else:
+        tr, va = gen_train_val_split(N_total=5000, N_train=2000,
+                                        seed=args.seed)
     t1 = gen_test1_set()
     t2 = gen_test2_set()
     print(f"  train: {tr['u'].shape[0]} steps")

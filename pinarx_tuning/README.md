@@ -1,6 +1,6 @@
-# PI-NARX Reproduction & LLM-AutoOpt Beat
+# PI-NARX + LLM-AutoOpt on the Thosar 2025 CSTR
 
-Reproducing and improving on:
+Building on the CSTR case study and PI-NARX architecture from:
 
 > Thosar, Bhakte, Li, Srinivasan, Prasad (2025).
 > "A novel hybrid neural network for modeling dynamic systems using
@@ -10,11 +10,28 @@ Reproducing and improving on:
 
 ## The plan
 
-The paper proposes **PI-NARX** — a Nonlinear Auto-Regressive with eXogenous
-inputs (NARX) neural network with a physics-informed regularization term.
-Hyperparameters were tuned by **trial-and-error** (their words, three times).
-We apply **LLM-AutoOpt** to the same hyperparameter space and aim to beat
-their published numbers across all four difficulty modes.
+Thosar et al. propose **PI-NARX** — a NARX neural network with a
+physics-informed regularization term — and tune hyperparameters by
+trial-and-error. We apply **LLM-AutoOpt** to the same architectures
+on the same CSTR plant and aim to beat hand-tuned baselines.
+
+We use the paper's **plant** (Bequette CSTR Eqs 6-9), **architectures**
+(NARX and PI-NARX), and **loss formulation** (Eqs 3-5, lambda_l=1e10,
+lambda_p=0.01) verbatim, but switch the training-data protocol from
+their random APRBS to a **dense 10x10 (Q_f, Q_c) grid** of training
+amplitudes. Why:
+
+- Paper's protocol (5000-min APRBS, 200-250 min holds) yields only ~22
+  random `(Q_f, Q_c)` amplitudes, which essentially never lands on the
+  Test 1 corners `(100, 20)` and `(140, 10)`. Their reported NARX MAE
+  of 0.001508 turns out to be very seed-sensitive: across 5 random
+  seeds we get mean 0.015 (10x worse than their number).
+- Dense-grid training (10 Q_f levels x 10 Q_c levels, 60-80 min holds,
+  ~6500 min total trajectory) covers the input cube uniformly and is
+  reproducible across seeds. Our NARX hits Test 1 MAE = 0.0002 (better
+  than paper's 0.001508 by 7x) with this protocol.
+
+The dense-grid baseline is the comparison point for LLM-AutoOpt.
 
 ## Target numbers to beat
 

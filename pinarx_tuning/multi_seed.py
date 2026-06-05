@@ -23,7 +23,8 @@ from pathlib import Path
 
 import torch
 
-from data_gen import (gen_train_val_split, gen_test1_set, gen_test2_set)
+from data_gen import (gen_train_val_split, gen_grid_train_val_split,
+                         gen_test1_set, gen_test2_set)
 from narx import (NARXHparams, NARXModel)
 from pi_narx import (PINARXHparams, PINARXModel)
 
@@ -33,14 +34,17 @@ PAPER = {"narx_t1":    0.001508, "narx_t2":    0.01934,
 
 
 def run_one_seed(seed: int, device: str,
+                  protocol: str = "grid",
                   pinarx_lbfgs: int = 9000,
                   narx_lbfgs:   int = 1000,
                   epochs: int = 1000,
                   verbose: bool = False) -> dict:
-    print(f"\n{'='*70}\n  SEED {seed}  (device={device})\n{'='*70}")
+    print(f"\n{'='*70}\n  SEED {seed}  (device={device}, protocol={protocol})\n{'='*70}")
 
-    # Data
-    tr, va = gen_train_val_split(N_total=5000, N_train=2000, seed=seed)
+    if protocol == "grid":
+        tr, va = gen_grid_train_val_split(qf_levels=10, qc_levels=10, seed=seed)
+    else:
+        tr, va = gen_train_val_split(N_total=5000, N_train=2000, seed=seed)
     t1, t2 = gen_test1_set(), gen_test2_set()
 
     out = {"seed": seed, "device": device,
@@ -121,6 +125,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seeds",  type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    ap.add_argument("--protocol", choices=["grid", "paper-aprbs"], default="grid",
+                    help="'grid' = 10x10 dense (Q_f, Q_c) grid (canonical, reproducible). "
+                         "'paper-aprbs' = paper's exact 5000-min APRBS (seed-dependent).")
     ap.add_argument("--pinarx-lbfgs", type=int, default=9000)
     ap.add_argument("--narx-lbfgs",   type=int, default=1000)
     ap.add_argument("--epochs",       type=int, default=1000)
@@ -133,6 +140,7 @@ if __name__ == "__main__":
     t_start = time.time()
     for s in args.seeds:
         r = run_one_seed(s, device=args.device,
+                          protocol=args.protocol,
                           pinarx_lbfgs=args.pinarx_lbfgs,
                           narx_lbfgs=args.narx_lbfgs,
                           epochs=args.epochs,
