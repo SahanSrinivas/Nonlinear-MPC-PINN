@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from narx import (NARXHparams, MLP, ZScore, make_windows)
+from narx import (NARXHparams, MLP, ZScore, MinMaxNorm, make_windows)
 from pinarx_plant import CSTRParams
 from data_gen import (TRAIN_QF_RANGE, TRAIN_QC_RANGE)
 
@@ -157,8 +157,9 @@ class PINARXModel:
         u_dim = hp.window * n_u if hp.include_u_lags else n_u
         self.in_dim  = hp.window * n_y + u_dim
         self.out_dim = n_y
-        self.x_norm = ZScore()
-        self.y_norm = ZScore()
+        # Paper §4: outputs normalized to [-1, 1]; same for inputs.
+        self.x_norm = MinMaxNorm()
+        self.y_norm = MinMaxNorm()
         torch.manual_seed(hp.seed)
         np.random.seed(hp.seed)
         self.net = MLP(self.in_dim, self.out_dim,
@@ -229,8 +230,26 @@ class PINARXModel:
             X_va, Y_va = make_windows(traj_val["u"], traj_val["y"], hp.window,
                                         include_u_lags=hp.include_u_lags)
 
-        # 2. Z-score normalize using TRAIN statistics
-        self.x_norm.fit(X_tr); self.y_norm.fit(Y_tr)
+        # 2. MinMax normalize to [-1, 1] per paper §4. Override u dims with
+        # theoretical bounds Q_f in [100,140], Q_c in [10,20]. y dims use
+        # train+val empirical min/max.
+        if traj_val is not None:
+            X_fit = np.concatenate([X_tr, X_va], axis=0)
+            Y_fit = np.concatenate([Y_tr, Y_va], axis=0)
+        else:
+            X_fit, Y_fit = X_tr, Y_tr
+        self.x_norm.fit(X_fit); self.y_norm.fit(Y_fit)
+
+        u_start = hp.window * self.n_y
+        u_lo_theory = np.array([100.0, 10.0], dtype=np.float32)
+        u_hi_theory = np.array([140.0, 20.0], dtype=np.float32)
+        if hp.include_u_lags:
+            u_lo_theory = np.tile(u_lo_theory, hp.window)
+            u_hi_theory = np.tile(u_hi_theory, hp.window)
+        self.x_norm.lo[u_start:] = u_lo_theory
+        self.x_norm.hi[u_start:] = u_hi_theory
+        self.x_norm.mean[u_start:] = (u_lo_theory + u_hi_theory) / 2.0
+        self.x_norm.std[u_start:]  = (u_hi_theory - u_lo_theory) / 2.0
         X_tr_n = self.x_norm.transform(X_tr)
         Y_tr_n = self.y_norm.transform(Y_tr)
         X_tr_t = torch.from_numpy(X_tr_n).to(device)
@@ -310,6 +329,7 @@ class PINARXModel:
         # 5. L-BFGS finetune (data + physics, full batch)
         if hp.lbfgs_iters > 0:
             lbfgs = torch.optim.LBFGS(self.net.parameters(),
+                                       lr=hp.lr_lbfgs,        # paper: 0.1
                                        max_iter=hp.lbfgs_iters,
                                        history_size=50,
                                        tolerance_grad=1e-9,

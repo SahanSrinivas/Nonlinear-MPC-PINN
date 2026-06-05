@@ -40,7 +40,8 @@ class NARXHparams:
     window:     int          = 2
     hidden:     tuple        = (200, 400, 200)
     activation: str          = "tanh"      # tanh | relu | gelu | silu
-    lr_adam:    float        = 1e-3
+    lr_adam:    float        = 1e-3        # paper §4.1
+    lr_lbfgs:   float        = 0.1         # paper §4.1: "with a learning rate of 0.1"
     n_epochs_adam: int       = 1000        # paper: Adam for 1000 epochs
     batch_size: int          = 64
     lbfgs_iters: int         = 1000        # paper: L-BFGS for 1000 iter (NARX)
@@ -96,7 +97,7 @@ def make_windows(u: np.ndarray, y: np.ndarray, w: int,
 
 
 # ============================================================================
-# Z-score normalizer
+# Z-score normalizer (kept for back-compat / experimentation)
 # ============================================================================
 @dataclass
 class ZScore:
@@ -107,6 +108,54 @@ class ZScore:
         self.mean = arr.mean(axis=0).astype(np.float32)
         self.std  = arr.std(axis=0).astype(np.float32)
         self.std[self.std < 1e-12] = 1.0
+        return self
+
+    def transform(self, arr: np.ndarray) -> np.ndarray:
+        return ((arr - self.mean) / self.std).astype(np.float32)
+
+    def inverse(self, arr: np.ndarray) -> np.ndarray:
+        return (arr * self.std + self.mean).astype(np.float32)
+
+
+# ============================================================================
+# MinMax normalizer to [-1, 1]  (paper §4: "Training outputs are first
+# normalized in the range of [-1, 1]")
+# ============================================================================
+@dataclass
+class MinMaxNorm:
+    """Maps each channel of `arr` from [lo, hi] -> [-1, 1] componentwise.
+
+    Exposes `.mean` and `.std` aliases so call-sites that were written for
+    the ZScore interface keep working:
+        mean = (lo + hi) / 2
+        std  = (hi - lo) / 2
+    Then the transform `(x - mean) / std` produces exactly the same
+    `2*(x-lo)/(hi-lo) - 1` mapping, with the same broadcasting semantics
+    used by ZScore.
+    """
+    lo:   np.ndarray = field(default=None)
+    hi:   np.ndarray = field(default=None)
+    mean: np.ndarray = field(default=None)
+    std:  np.ndarray = field(default=None)
+
+    def fit(self, arr: np.ndarray) -> "MinMaxNorm":
+        self.lo = arr.min(axis=0).astype(np.float32)
+        self.hi = arr.max(axis=0).astype(np.float32)
+        # Guard against degenerate channels (hi == lo)
+        flat = (self.hi - self.lo) < 1e-12
+        if flat.any():
+            self.hi = np.where(flat, self.lo + 1.0, self.hi).astype(np.float32)
+        self.mean = ((self.lo + self.hi) / 2.0).astype(np.float32)
+        self.std  = ((self.hi - self.lo) / 2.0).astype(np.float32)
+        return self
+
+    def fit_to_bounds(self, lo: np.ndarray, hi: np.ndarray) -> "MinMaxNorm":
+        """Use externally-provided bounds (e.g. theoretical operating range)
+        instead of empirical training min/max."""
+        self.lo = np.asarray(lo, dtype=np.float32)
+        self.hi = np.asarray(hi, dtype=np.float32)
+        self.mean = ((self.lo + self.hi) / 2.0).astype(np.float32)
+        self.std  = ((self.hi - self.lo) / 2.0).astype(np.float32)
         return self
 
     def transform(self, arr: np.ndarray) -> np.ndarray:
@@ -159,8 +208,10 @@ class NARXModel:
         u_dim = hp.window * n_u if hp.include_u_lags else n_u
         self.in_dim  = hp.window * n_y + u_dim
         self.out_dim = n_y
-        self.x_norm = ZScore()
-        self.y_norm = ZScore()
+        # Paper §4: outputs normalized to [-1, 1]. We do the same for inputs,
+        # which is standard practice. Using train-set min/max.
+        self.x_norm = MinMaxNorm()
+        self.y_norm = MinMaxNorm()
         torch.manual_seed(hp.seed)
         np.random.seed(hp.seed)
         self.net = MLP(self.in_dim, self.out_dim,
@@ -187,8 +238,33 @@ class NARXModel:
             X_va, Y_va = make_windows(traj_val["u"], traj_val["y"], hp.window,
                                         include_u_lags=hp.include_u_lags)
 
-        # 2. Normalize using TRAINING statistics
-        self.x_norm.fit(X_tr); self.y_norm.fit(Y_tr)
+        # 2. Normalize. For inputs we OVERRIDE the u dims with the paper's
+        # theoretical training-input bounds Q_f in [100,140], Q_c in [10,20]
+        # so that test inputs at the (100,20)/(140,10) corners normalize
+        # exactly to +/-1, not to +/-1.5 because our random APRBS happened
+        # to miss the corners. For y dims we use empirical train+val min/max
+        # (paper trains a single 5000-min trajectory, so train+val sees the
+        # full operating envelope they sampled).
+        if traj_val is not None:
+            X_fit = np.concatenate([X_tr, X_va], axis=0)
+            Y_fit = np.concatenate([Y_tr, Y_va], axis=0)
+        else:
+            X_fit, Y_fit = X_tr, Y_tr
+        self.x_norm.fit(X_fit); self.y_norm.fit(Y_fit)
+
+        # Override u dims with theoretical bounds (paper §A: Q_f in [100,140],
+        # Q_c in [10,20]). Format of feature: [y(t-1), ..., y(t-w), u(t-1)?]
+        # so u dims start at index w*n_y.
+        u_start = hp.window * self.n_y
+        u_lo_theory = np.array([100.0, 10.0], dtype=np.float32)
+        u_hi_theory = np.array([140.0, 20.0], dtype=np.float32)
+        if hp.include_u_lags:
+            u_lo_theory = np.tile(u_lo_theory, hp.window)
+            u_hi_theory = np.tile(u_hi_theory, hp.window)
+        self.x_norm.lo[u_start:] = u_lo_theory
+        self.x_norm.hi[u_start:] = u_hi_theory
+        self.x_norm.mean[u_start:] = (u_lo_theory + u_hi_theory) / 2.0
+        self.x_norm.std[u_start:]  = (u_hi_theory - u_lo_theory) / 2.0
         X_tr_n = self.x_norm.transform(X_tr)
         Y_tr_n = self.y_norm.transform(Y_tr)
 
@@ -258,6 +334,7 @@ class NARXModel:
         # 4. L-BFGS phase (full batch on training set)
         if hp.lbfgs_iters > 0:
             lbfgs = torch.optim.LBFGS(self.net.parameters(),
+                                       lr=hp.lr_lbfgs,        # paper: 0.1
                                        max_iter=hp.lbfgs_iters,
                                        history_size=50,
                                        tolerance_grad=1e-9,
