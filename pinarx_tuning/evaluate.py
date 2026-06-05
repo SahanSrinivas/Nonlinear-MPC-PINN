@@ -120,8 +120,6 @@ if __name__ == "__main__":
 
     results = load_results(args.results)
     if args.noise == "snr35":
-        ref = {k: v["SNR 35"] for k, v in PAPER_TABLE_6.items()}
-        # Reshape to match render_table signature
         ref = {f"{m} SNR 35": PAPER_TABLE_6["SNR 35"][m]
                 for m in ("NARX", "PI-NARX")}
         print(render_table(results, reference=ref, noise="SNR 35"))
