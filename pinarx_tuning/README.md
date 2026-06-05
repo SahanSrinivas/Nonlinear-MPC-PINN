@@ -23,15 +23,20 @@ amplitudes. Why:
 
 - Paper's protocol (5000-min APRBS, 200-250 min holds) yields only ~22
   random `(Q_f, Q_c)` amplitudes, which essentially never lands on the
-  Test 1 corners `(100, 20)` and `(140, 10)`. Their reported NARX MAE
-  of 0.001508 turns out to be very seed-sensitive: across 5 random
-  seeds we get mean 0.015 (10x worse than their number).
-- Dense-grid training (10 Q_f levels x 10 Q_c levels, 60-80 min holds,
-  ~6500 min total trajectory) covers the input cube uniformly and is
-  reproducible across seeds. Our NARX hits Test 1 MAE = 0.0002 (better
-  than paper's 0.001508 by 7x) with this protocol.
+  Test 1 corners `(100, 20)` and `(140, 10)`. Across 5 random seeds we
+  get mean 0.015 (10x worse than paper) - their 0.001508 appears to
+  require a lucky seed.
+- Dense-grid training (10 x 10 amplitudes, 60-80 min holds, ~6500 min
+  total) covers the input cube uniformly and is reproducible. The grid
+  uses the OPEN interval (102, 138) x (10.5, 19.5) so it never lands on
+  the Test 1 corners either - this avoids training-test leakage. With
+  this honest protocol NARX hits **Test 1 MAE = 0.001376 (matches paper
+  0.001508 to within 9%)**, confirming the architecture is correct.
 
-The dense-grid baseline is the comparison point for LLM-AutoOpt.
+The interesting gap is **Test 2 (extrapolation outside [100, 140] x [10, 20]
+training cube)**: our NARX = 0.125 vs paper 0.019 - 6x worse. This is the
+real LLM-AutoOpt opportunity: tuning lambda_p, collocation envelope and
+architecture should push extrapolation back toward (and through) paper.
 
 ## Target numbers to beat
 

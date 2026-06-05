@@ -132,30 +132,41 @@ def gen_train_val_split(N_total: int = 5000, N_train: int = 2000,
 def gen_grid_train_val_split(qf_levels: int = 10, qc_levels: int = 10,
                                 hold_min: int = 60, hold_max: int = 80,
                                 train_frac: float = 0.6, seed: int = 0,
+                                exclude_corners: bool = True,
                                 p: CSTRParams | None = None
                                 ) -> tuple[dict, dict]:
     """Dense-grid training data: `qf_levels` x `qc_levels` Cartesian product
-    of (Q_f, Q_c) amplitudes spanning the operating envelope [100,140]x[10,20],
-    each held for a random duration in [hold_min, hold_max] minutes. Order is
-    randomly shuffled so the model sees diverse transients.
+    of (Q_f, Q_c) amplitudes spanning the operating envelope, each held for
+    a random duration in [hold_min, hold_max] minutes. Order is randomly
+    shuffled so the model sees diverse transients.
+
+    By default `exclude_corners=True`: the grid uses the OPEN interval
+    (102, 138) x (10.5, 19.5) so it never hits the exact Test 1 schedule
+    amplitudes (100, 20) and (140, 10). This avoids leakage from training
+    onto the test corners and gives an honest evaluation of the model's
+    interpolation/extrapolation capability.
+
+    Set `exclude_corners=False` to use [100, 140] x [10, 20] (closed
+    interval), which DOES include the exact test schedule values - useful
+    only for sanity checks; not the canonical protocol.
 
     Total trajectory: qf_levels * qc_levels * mean_hold ~ 100 amplitudes x
     70 min = 7000 min. Train = first `train_frac`, val = remainder.
 
-    Why this protocol:
-      - Guarantees coverage of (100, 20) and (140, 10) Test 1 corners, so
-        evaluation is interpolation (not extrapolation by accident).
-      - 60-80 min holds are long enough for h, T, T_c (response ~110 min) to
-        approach steady state from the previous SS but keeps the dataset
-        dynamic; C_A (response 132 min) stays mildly transient, which is
-        actually useful for one-step-ahead learning.
-      - Reproducible across seeds (only the shuffle order changes).
-
     Returns (train_dict, val_dict).
     """
     rng = np.random.default_rng(seed)
-    qf_vals = np.linspace(TRAIN_QF_RANGE[0], TRAIN_QF_RANGE[1], qf_levels)
-    qc_vals = np.linspace(TRAIN_QC_RANGE[0], TRAIN_QC_RANGE[1], qc_levels)
+    if exclude_corners:
+        # Pad inward from each edge so (100, 20) and (140, 10) are NOT
+        # hit by training amplitudes. The padding (2.0 for Q_f, 0.5 for Q_c)
+        # is ~5% of each range.
+        qf_lo, qf_hi = TRAIN_QF_RANGE[0] + 2.0, TRAIN_QF_RANGE[1] - 2.0
+        qc_lo, qc_hi = TRAIN_QC_RANGE[0] + 0.5, TRAIN_QC_RANGE[1] - 0.5
+    else:
+        qf_lo, qf_hi = TRAIN_QF_RANGE
+        qc_lo, qc_hi = TRAIN_QC_RANGE
+    qf_vals = np.linspace(qf_lo, qf_hi, qf_levels)
+    qc_vals = np.linspace(qc_lo, qc_hi, qc_levels)
     amps = [(float(qf), float(qc)) for qf in qf_vals for qc in qc_vals]
     rng.shuffle(amps)
     holds = rng.integers(hold_min, hold_max + 1, size=len(amps))
