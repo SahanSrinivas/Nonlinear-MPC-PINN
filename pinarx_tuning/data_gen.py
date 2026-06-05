@@ -44,9 +44,11 @@ Y0_SS = np.array([0.0025, 416.1167, 351.5503, 9.0])
 # Default sample interval (paper uses 1 min)
 DT_DEFAULT = 1.0
 
-# Default APRBS hold length range (steps held this many sample intervals)
-HOLD_MIN_STEPS = 20
-HOLD_MAX_STEPS = 80
+# APRBS hold length range (paper §A: "Sample durations were also randomly
+# assigned within the range of 200-250 min to ensure that the system reached
+# a steady state after each input change")
+HOLD_MIN_STEPS = 200
+HOLD_MAX_STEPS = 250
 
 
 # ============================================================================
@@ -86,27 +88,48 @@ def _rollout(u: np.ndarray, y0: np.ndarray | None = None,
     return simulate(y0, u, dt=dt, p=p)
 
 
+def gen_train_val_split(N_total: int = 5000, N_train: int = 2000,
+                          seed: int = 0,
+                          p: CSTRParams | None = None) -> tuple[dict, dict]:
+    """Paper §A protocol: simulate ONE 5000-min trajectory with random Q_f
+    in [100,140] and Q_c in [10,20], holds 200-250 min. First N_train minutes
+    are training data; the rest are validation.
+
+    Returns (train_dict, val_dict).
+    """
+    u_lo = np.array([TRAIN_QF_RANGE[0], TRAIN_QC_RANGE[0]])
+    u_hi = np.array([TRAIN_QF_RANGE[1], TRAIN_QC_RANGE[1]])
+    u_full = gen_aprbs(N_total, u_lo, u_hi, seed=seed)
+    y_full = _rollout(u_full, p=p)
+    # Split: train = first N_train samples; val = remaining
+    u_tr, u_va = u_full[:N_train],     u_full[N_train:]
+    # y[i] is the state BEFORE applying u[i]; split aligns to u, include the
+    # "before" of the first val sample as its IC.
+    y_tr = y_full[:N_train + 1]
+    y_va = y_full[N_train:]
+    return ({"u": u_tr, "y": y_tr, "dt": DT_DEFAULT,
+              "meta": f"train  N={N_train} of {N_total} seed={seed}"},
+             {"u": u_va, "y": y_va, "dt": DT_DEFAULT,
+              "meta": f"val    N={N_total-N_train} of {N_total} seed={seed}"})
+
+
+# Back-compat shims so call-sites that already use the old names keep working.
 def gen_training_set(N: int = 2000, seed: int = 0,
                       p: CSTRParams | None = None) -> dict:
-    """Training set: APRBS within training range, N minutes long."""
-    u_lo = np.array([TRAIN_QF_RANGE[0], TRAIN_QC_RANGE[0]])
-    u_hi = np.array([TRAIN_QF_RANGE[1], TRAIN_QC_RANGE[1]])
-    u = gen_aprbs(N, u_lo, u_hi, seed=seed)
-    y = _rollout(u, p=p)
-    return {"u": u, "y": y, "dt": DT_DEFAULT,
-             "meta": f"training_set N={N} seed={seed} "
-                       f"Q_f~U{TRAIN_QF_RANGE} Q_c~U{TRAIN_QC_RANGE}"}
+    """Paper-faithful: train = first 2000 min of the single 5000-min run."""
+    tr, _ = gen_train_val_split(N_total=5000, N_train=N, seed=seed, p=p)
+    return tr
 
 
-def gen_validation_set(N: int = 3000, seed: int = 1,
+def gen_validation_set(N: int = 3000, seed: int = 0,
                         p: CSTRParams | None = None) -> dict:
-    """Validation set: same protocol as training, different seed."""
-    u_lo = np.array([TRAIN_QF_RANGE[0], TRAIN_QC_RANGE[0]])
-    u_hi = np.array([TRAIN_QF_RANGE[1], TRAIN_QC_RANGE[1]])
-    u = gen_aprbs(N, u_lo, u_hi, seed=seed)
-    y = _rollout(u, p=p)
-    return {"u": u, "y": y, "dt": DT_DEFAULT,
-             "meta": f"validation_set N={N} seed={seed} (same range as train)"}
+    """Paper-faithful: val = remaining 3000 min of the same 5000-min run.
+
+    NOTE: `seed` should match the training seed - validation IS the second
+    portion of the SAME trajectory, not an independent draw.
+    """
+    _, va = gen_train_val_split(N_total=N + 2000, N_train=2000, seed=seed, p=p)
+    return va
 
 
 def _schedule_to_traj(schedule: list[tuple[int, int, float, float]],
@@ -126,57 +149,46 @@ def _schedule_to_traj(schedule: list[tuple[int, int, float, float]],
 
 
 def gen_test1_set(p: CSTRParams | None = None) -> dict:
-    """Test Case 1: schedule of inputs INSIDE the training range (interpolation).
+    """Test Case 1 (paper §Generating test cases): TWO perturbations within
+    the training range; SS in between.
 
-    Schedule (paper-style; minutes):
-       0-100    Q_f=120,  Q_c=15   (start at SS)
-     100-300    Q_f=100,  Q_c=20   (lo Q_f, hi Q_c)
-     300-500    Q_f=120,  Q_c=15
-     500-900    Q_f=130,  Q_c=12
-     900-1100   Q_f=140,  Q_c=10   (hi Q_f, lo Q_c - corner of training cube)
-    1100-1400   Q_f=110,  Q_c=18
+       0-100    Q_f=120,  Q_c=15   (SS)
+     100-300    Q_f=100,  Q_c=20   (perturbation #1, 200 min)
+     300-900    Q_f=120,  Q_c=15   (returned to SS for ~600 min)
+     900-1100   Q_f=140,  Q_c=10   (perturbation #2, 200 min)
+    1100-1400   Q_f=120,  Q_c=15   (returned to SS, 300 min)
     """
     schedule = [
         (   0,  100, 120.0, 15.0),
         ( 100,  300, 100.0, 20.0),
-        ( 300,  500, 120.0, 15.0),
-        ( 500,  900, 130.0, 12.0),
+        ( 300,  900, 120.0, 15.0),
         ( 900, 1100, 140.0, 10.0),
-        (1100, 1400, 110.0, 18.0),
+        (1100, 1400, 120.0, 15.0),
     ]
     out = _schedule_to_traj(schedule, p=p)
-    out["meta"] = "test1_within_range (interpolation)"
+    out["meta"] = "test1_within_range (paper exact)"
     return out
 
 
 def gen_test2_set(p: CSTRParams | None = None) -> dict:
-    """Test Case 2: schedule of inputs OUTSIDE the training range (extrapolation).
+    """Test Case 2 (paper §Generating test cases): same shape as Test 1 but
+    each perturbation has BOTH Q_f and Q_c outside training range.
 
-    Schedule (milder than Test 1's amplitude excursions to keep MAE bounded;
-    paper-style: only ONE channel pushes outside at a time, shorter holds):
-       0-100    Q_f=120,  Q_c=15   (start at SS)
-     100-250    Q_f= 90,  Q_c=15   (Q_f below training)
-     250-400    Q_f=120,  Q_c=15
-     400-550    Q_f=150,  Q_c=15   (Q_f above training)
-     550-700    Q_f=120,  Q_c=15
-     700-850    Q_f=120,  Q_c= 5   (Q_c below training)
-     850-1000   Q_f=120,  Q_c=15
-    1000-1150   Q_f=120,  Q_c=25   (Q_c above training)
-    1150-1400   Q_f=120,  Q_c=15   (return to SS)
+       0-100    Q_f=120,  Q_c=15   (SS)
+     100-300    Q_f= 90,  Q_c=25   (perturbation #1 - both outside)
+     300-900    Q_f=120,  Q_c=15   (back to SS)
+     900-1100   Q_f=150,  Q_c= 5   (perturbation #2 - both outside)
+    1100-1400   Q_f=120,  Q_c=15   (back to SS)
     """
     schedule = [
         (   0,  100, 120.0, 15.0),
-        ( 100,  250,  90.0, 15.0),
-        ( 250,  400, 120.0, 15.0),
-        ( 400,  550, 150.0, 15.0),
-        ( 550,  700, 120.0, 15.0),
-        ( 700,  850, 120.0,  5.0),
-        ( 850, 1000, 120.0, 15.0),
-        (1000, 1150, 120.0, 25.0),
-        (1150, 1400, 120.0, 15.0),
+        ( 100,  300,  90.0, 25.0),
+        ( 300,  900, 120.0, 15.0),
+        ( 900, 1100, 150.0,  5.0),
+        (1100, 1400, 120.0, 15.0),
     ]
     out = _schedule_to_traj(schedule, p=p)
-    out["meta"] = "test2_extrapolation (one channel outside at a time)"
+    out["meta"] = "test2_extrapolation (paper exact)"
     return out
 
 

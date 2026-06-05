@@ -405,14 +405,13 @@ def train_and_eval_narx(traj_train, traj_val, traj_test1, traj_test2,
 # ============================================================================
 if __name__ == "__main__":
     import argparse, torch as _t
-    from data_gen import (gen_training_set, gen_validation_set,
-                            gen_test1_set, gen_test2_set)
+    from data_gen import (gen_train_val_split, gen_test1_set, gen_test2_set)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda" if _t.cuda.is_available() else "cpu")
     ap.add_argument("--seed",   type=int, default=0)
-    ap.add_argument("--n-train",type=int, default=5000)
-    ap.add_argument("--n-val",  type=int, default=3000)
+    ap.add_argument("--n-total",type=int, default=5000)
+    ap.add_argument("--n-train",type=int, default=2000)
     ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--lbfgs",  type=int, default=1000)
     args = ap.parse_args()
@@ -423,8 +422,8 @@ if __name__ == "__main__":
     print("=" * 70)
 
     print("Generating data...")
-    tr = gen_training_set(N=args.n_train, seed=args.seed)
-    va = gen_validation_set(N=args.n_val,  seed=args.seed + 1)
+    tr, va = gen_train_val_split(N_total=args.n_total, N_train=args.n_train,
+                                    seed=args.seed)
     t1 = gen_test1_set()
     t2 = gen_test2_set()
     print(f"  train: {tr['u'].shape[0]} steps")
