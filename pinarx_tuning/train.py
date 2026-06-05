@@ -29,7 +29,7 @@ import torch
 
 from data_gen import (gen_grid_train_val_split, gen_train_val_split,
                         gen_test1_set, gen_test2_set,
-                        add_noise, SNR_T6_NOISY_LO, SNR_T6_NOISY_HI)
+                        add_noise, NOISE_PROFILES)
 from resphys_narx import (ResPhysNARXHparams, ResPhysNARXModel)
 
 
@@ -53,7 +53,7 @@ def build_hparams(overrides: dict | None = None) -> ResPhysNARXHparams:
 
 def run_trial(hp_overrides: dict | None = None,
                 qf_levels: int = 10, qc_levels: int = 10,
-                noise: str | None = None,    # None | "snr35" | "snr100"
+                noise: str | None = None,    # None | "snr35" | "snr100" | "snr250"
                 noise_seed: int = 42,
                 verbose: bool = False,
                 save_figs_dir: str | None = None,
@@ -66,8 +66,10 @@ def run_trial(hp_overrides: dict | None = None,
                     Any non-mentioned field keeps its default.
       qf_levels, qc_levels: dense-grid training resolution. Ignored when
                               protocol='aprbs'.
-      noise: if 'snr35' or 'snr100', add Gaussian noise to TRAINING and
-             TEST trajectories (paper Table 6 protocol). None = noiseless.
+      noise: if 'snr35', 'snr100', or 'snr250', add Gaussian noise to
+             TRAINING and TEST trajectories. 'snr35' and 'snr100' are the
+             paper Table 6 protocols; 'snr250' is our light-noise extension
+             for the LLMAgentOpt-vs-TPE ablation. None = noiseless.
       noise_seed: RNG seed for the noise.
       protocol: 'grid' = our 10x10 dense-grid (open interval, reproducible).
                 'aprbs' = paper-exact (5000-min APRBS, 200-250 min holds,
@@ -87,7 +89,10 @@ def run_trial(hp_overrides: dict | None = None,
                                               qc_levels=qc_levels, seed=seed)
     t1, t2 = gen_test1_set(), gen_test2_set()
     if noise is not None:
-        snr_vec = SNR_T6_NOISY_LO if noise == "snr35" else SNR_T6_NOISY_HI
+        if noise not in NOISE_PROFILES:
+            raise ValueError(f"Unknown noise profile {noise!r}; "
+                              f"choose from {list(NOISE_PROFILES)}")
+        snr_vec = NOISE_PROFILES[noise]
         # NOTE: we noise the OUTPUT trajectories used for windowing.
         # The plant is deterministic; "training/test" noise corresponds to
         # measurement noise.
@@ -188,7 +193,10 @@ def _parse_args():
     ap.add_argument("--seed",   type=int, default=0)
     ap.add_argument("--qf-levels", type=int, default=10)
     ap.add_argument("--qc-levels", type=int, default=10)
-    ap.add_argument("--noise",  choices=[None, "snr35", "snr100"], default=None)
+    ap.add_argument("--noise",  choices=[None, "snr35", "snr100", "snr250"],
+                    default=None,
+                    help="None=noiseless; snr35/snr100=paper Table 6; "
+                         "snr250=light-noise (ablation)")
     ap.add_argument("--protocol", choices=["grid", "aprbs"], default="grid",
                     help="grid (10x10 open-interval, default) | aprbs "
                          "(paper-exact 5000-min APRBS, 2000/3000 split)")
@@ -205,6 +213,10 @@ def _parse_args():
     ap.add_argument("--batch-size", type=int,   default=64)
     ap.add_argument("--residual-l2", type=float, default=0.0)
     ap.add_argument("--rk4-substeps", type=int, default=50)
+    ap.add_argument("--physics-mode", choices=["full", "mass", "energy", "none"],
+                    default="full",
+                    help="Limited-knowledge ablation (paper Table 5). "
+                         "full=all; mass=C_A,h only; energy=T,T_c only; none=pure NARX")
     ap.add_argument("--out",        default=None, help="JSON path to save result")
     ap.add_argument("--save-figs",  default=None,
                     help="Directory to save paper-style figures (Fig 3, A.2, A.3)")
@@ -225,6 +237,7 @@ if __name__ == "__main__":
         lbfgs_iters=args.lbfgs,
         residual_l2=args.residual_l2,
         rk4_sub_steps=args.rk4_substeps,
+        physics_mode=args.physics_mode,
         seed=args.seed,
         device=args.device,
     )

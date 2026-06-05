@@ -350,7 +350,7 @@ def tuning_agent(strategy_config: dict, last_hp: dict) -> dict:
 def tune(study_name: str = "resphys_default",
            n_trials: int = 50,
            mode: str = "none",          # none | llambo | llm_agent_opt | lean3 (alias)
-           noise: str | None = None,    # None | "snr35" | "snr100"
+           noise: str | None = None,    # None | "snr35" | "snr100" | "snr250"
            protocol: str = "grid",      # "grid" | "aprbs"
            llm_ratio: float = 0.3,      # fraction of trials driven by LLM
            qf_levels: int = 10, qc_levels: int = 10,
@@ -510,8 +510,11 @@ if __name__ == "__main__":
                     help="none=pure TPE; llambo=warm-start only; "
                          "llm_agent_opt=full 3-agent loop (recommended). "
                          "'lean3' is kept as a backward-compat alias.")
-    ap.add_argument("--noise",      choices=[None, "snr35", "snr100"],
-                    default=None)
+    ap.add_argument("--noise",      choices=[None, "snr35", "snr100",
+                                                 "snr250"],
+                    default=None,
+                    help="None=noiseless; snr35/snr100=paper Table 6; "
+                         "snr250=light-noise (LLMAgentOpt vs TPE ablation)")
     ap.add_argument("--protocol",   choices=["grid", "aprbs"], default="grid",
                     help="grid (10x10 open-interval, default) | aprbs "
                          "(paper-exact 5000-min APRBS, 2000/3000 split). "

@@ -88,6 +88,12 @@ class ResPhysNARXHparams:
     # Optional regularizer that encourages the NN residual to stay small
     # ("trust physics"). 0.0 disables.
     residual_l2:   float = 0.0
+    # Limited-knowledge ablation (paper Table 5 equivalent).
+    #   full   = all 4 channels predicted by physics (mass+energy+level)
+    #   mass   = physics knows C_A, h (mass+level); T, T_c left to NN
+    #   energy = physics knows T, T_c (energy);     C_A, h left to NN
+    #   none   = pure NARX (physics = identity); NN learns everything
+    physics_mode: str = "full"
 
     # --- Bookkeeping ---
     seed:   int = 0
@@ -163,10 +169,26 @@ class ResPhysNARXModel:
         y_prev_np = y_prev_orig.detach().cpu().numpy().astype(np.float64)
         u_np      = u_orig.detach().cpu().numpy().astype(np.float64)
         B = y_prev_np.shape[0]
-        y_phys_np = np.empty((B, self.n_y), dtype=np.float32)
-        for i in range(B):
-            y_phys_np[i] = scipy_step(y_prev_np[i], u_np[i],
-                                         dt=1.0, p=self.p_plant)
+        mode = getattr(self.hp, "physics_mode", "full")
+        if mode == "none":
+            # NN learns everything; physics is identity. Equivalent to plain NARX.
+            y_phys_np = y_prev_np.astype(np.float32)
+        else:
+            y_phys_np = np.empty((B, self.n_y), dtype=np.float32)
+            for i in range(B):
+                y_phys_np[i] = scipy_step(y_prev_np[i], u_np[i],
+                                             dt=1.0, p=self.p_plant)
+            if mode == "mass":
+                # Knock out energy channels (T, T_c) -> physics doesn't predict them.
+                y_phys_np[:, 1] = y_prev_np[:, 1].astype(np.float32)
+                y_phys_np[:, 2] = y_prev_np[:, 2].astype(np.float32)
+            elif mode == "energy":
+                # Knock out mass/level channels (C_A, h) -> physics doesn't predict them.
+                y_phys_np[:, 0] = y_prev_np[:, 0].astype(np.float32)
+                y_phys_np[:, 3] = y_prev_np[:, 3].astype(np.float32)
+            elif mode != "full":
+                raise ValueError(f"Unknown physics_mode={mode!r}; "
+                                  f"choose full | mass | energy | none")
         y_phys = torch.from_numpy(y_phys_np).to(y_prev_orig.device)
         y_mean = torch.from_numpy(self.y_norm.mean).to(y_phys.device)
         y_std  = torch.from_numpy(self.y_norm.std ).to(y_phys.device)

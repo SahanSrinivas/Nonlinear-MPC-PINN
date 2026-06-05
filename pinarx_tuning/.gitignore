@@ -9,7 +9,19 @@ __pycache__/
 venv/
 
 # Training runs / outputs
-runs/
+# Default: ignore everything under runs/ ...
+runs/*
+# ... EXCEPT the lightweight result JSONs and figures we want to publish.
+!runs/.gitkeep
+!runs/sota_survey.md
+!runs/**/best.json
+!runs/**/results.json
+!runs/**/tuner.log
+!runs/figs/
+!runs/figs/**/*.png
+!runs/figs/**/*.pdf
+
+# Always skip heavy artifacts
 checkpoints/
 *.pt
 *.pth

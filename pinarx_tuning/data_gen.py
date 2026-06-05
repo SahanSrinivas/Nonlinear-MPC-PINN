@@ -277,34 +277,53 @@ def gen_test2_set(p: CSTRParams | None = None) -> dict:
 # ============================================================================
 # Noise wrapper - SNR-based Gaussian noise per channel  (Table 6)
 # ============================================================================
-def add_noise(y: np.ndarray, snr_db_per_channel: list[float],
+def add_noise(y: np.ndarray, snr_per_channel: list[float],
                seed: int = 0) -> np.ndarray:
-    """Add Gaussian measurement noise with the per-channel SNR (in dB) given by
-    the paper:
+    """Add Gaussian measurement noise with the per-channel SNR (power ratio).
 
-        SNR_dB = 10 * log10( P_signal / P_noise )
-        ->  sigma_noise = sigma_signal / 10^(SNR_dB / 20)
+    Paper §4.6 quotes "SNR represents the ratio of a signal's power to the
+    corresponding noise amplitude" with SNR=35 (for C_A) and SNR=100 (for
+    T, T_c, h). We interpret SNR as the standard **signal-processing
+    power-ratio** convention:
 
-    Paper Table 6 uses:
-        SNR = 35  for C_A
-        SNR = 100 for T, T_c, h
+        SNR  =  signal_power / noise_power
+             =  signal_var   / noise_var
 
-    sigma_signal is computed from the trajectory variance per channel.
+    so
+
+        noise_std = signal_std / sqrt(SNR)
+
+    This is what makes the visible noise on T, T_c, h in paper Figs 7-8
+    (~1-2 K peak-to-peak) match the stated SNR=100 — a dB interpretation
+    would make SNR=100 essentially noiseless, and a linear-amplitude-ratio
+    interpretation makes T noise ~0.1 K which is too small to see. Power
+    ratio gives noise_std ~= signal_std/10 at SNR=100 which matches the
+    paper figures.
+
+    Use SNR > 1e6 to effectively disable noise on a channel.
     """
     rng = np.random.default_rng(seed)
-    y_noisy = y.copy()
-    for c, snr in enumerate(snr_db_per_channel):
+    y_noisy = y.copy().astype(np.float64)
+    for c, snr in enumerate(snr_per_channel):
         sig = float(np.std(y[:, c]))
-        if sig == 0.0 or not math.isfinite(snr) or snr > 200:
+        if sig == 0.0 or not math.isfinite(snr) or snr <= 0.0 or snr > 1e6:
             continue
-        sigma_noise = sig / (10.0 ** (snr / 20.0))
+        sigma_noise = sig / math.sqrt(snr)
         y_noisy[:, c] = y[:, c] + rng.normal(0.0, sigma_noise, size=y.shape[0])
-    return y_noisy
+    return y_noisy.astype(y.dtype)
 
 
 # Paper Table 6 standard SNR vectors
-SNR_T6_NOISY_LO = [35.0, 100.0, 100.0, 100.0]    # "SNR 35" row
-SNR_T6_NOISY_HI = [100.0, 100.0, 100.0, 100.0]   # "SNR 100" row
+SNR_T6_NOISY_LO  = [35.0,  100.0, 100.0, 100.0]   # "SNR 35"  row (paper Table 6)
+SNR_T6_NOISY_HI  = [100.0, 100.0, 100.0, 100.0]   # "SNR 100" row (paper Table 6)
+SNR_T6_NOISY_VHI = [250.0, 100.0, 100.0, 100.0]   # "SNR 250" - light-noise extension
+
+# Convenience dict for callers that route by string label.
+NOISE_PROFILES = {
+    "snr35":  SNR_T6_NOISY_LO,
+    "snr100": SNR_T6_NOISY_HI,
+    "snr250": SNR_T6_NOISY_VHI,
+}
 
 
 # ============================================================================

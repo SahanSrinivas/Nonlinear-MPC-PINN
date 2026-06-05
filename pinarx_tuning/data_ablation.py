@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 
 from data_gen import (gen_grid_train_val_split, gen_test1_set, gen_test2_set,
-                        add_noise, SNR_T6_NOISY_LO, SNR_T6_NOISY_HI)
+                        add_noise, NOISE_PROFILES)
 from resphys_narx import (ResPhysNARXHparams, ResPhysNARXModel)
 from plots import (plot_fig5_style, plot_fig6_style, plot_test_case_4panel)
 from train import PAPER_REF
@@ -42,7 +42,7 @@ def train_one_size(n_points: int, args, t1, t2, noise: str | None
                                           seed=args.seed,
                                           n_train_points=n_points)
     if noise is not None:
-        snr_vec = SNR_T6_NOISY_LO if noise == "snr35" else SNR_T6_NOISY_HI
+        snr_vec = NOISE_PROFILES[noise]
         tr = {**tr, "y": add_noise(tr["y"], snr_vec, seed=42)}
         va = {**va, "y": add_noise(va["y"], snr_vec, seed=43)}
     actual_size = tr["u"].shape[0]
@@ -122,7 +122,7 @@ def main():
             f"device={args.device} ===")
     t1, t2 = gen_test1_set(), gen_test2_set()
     if args.noise is not None:
-        snr_vec = SNR_T6_NOISY_LO if args.noise == "snr35" else SNR_T6_NOISY_HI
+        snr_vec = NOISE_PROFILES[args.noise]
         t1 = {**t1, "y": add_noise(t1["y"], snr_vec, seed=44)}
         t2 = {**t2, "y": add_noise(t2["y"], snr_vec, seed=45)}
 

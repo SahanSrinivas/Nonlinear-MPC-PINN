@@ -1,0 +1,19 @@
+# Core scientific stack
+numpy>=1.26,<3.0
+scipy>=1.11
+matplotlib>=3.8
+
+# Deep learning (CUDA wheels auto-resolved on Colab)
+torch>=2.2
+
+# Hyperparameter optimization (TPE + enqueue_trial)
+optuna>=3.6
+
+# LLM backends for LLMAgentOpt
+#   Diagnostic + Tuning agents -> gpt-4o-mini
+#   Strategy agent             -> claude-opus-4-7 / 4-8
+openai>=1.40
+anthropic>=0.34
+
+# Util
+tqdm>=4.66
