@@ -169,6 +169,27 @@ class ResPhysNARXModel:
         y_prev_np = y_prev_orig.detach().cpu().numpy().astype(np.float64)
         u_np      = u_orig.detach().cpu().numpy().astype(np.float64)
         B = y_prev_np.shape[0]
+
+        # Sanitize before scipy. Autoregressive rollout on a poorly trained
+        # model can drift to NaN/Inf, which makes scipy_step raise
+        # "All components of y0 must be finite". Replace non-finite entries
+        # with a physically-safe state and clamp to sensible bounds so the
+        # rollout keeps going (the resulting MAE will be large -> still a
+        # useful signal that the config is unstable).
+        if not np.isfinite(y_prev_np).all():
+            safe = np.array([0.001, 350.0, 320.0, 1.0], dtype=np.float64)
+            mask = ~np.isfinite(y_prev_np)
+            y_prev_np = np.where(mask, np.broadcast_to(safe, y_prev_np.shape),
+                                  y_prev_np)
+        y_prev_np[:, 0] = np.clip(y_prev_np[:, 0], 0.0,    10.0)
+        y_prev_np[:, 1] = np.clip(y_prev_np[:, 1], 200.0, 600.0)
+        y_prev_np[:, 2] = np.clip(y_prev_np[:, 2], 200.0, 600.0)
+        y_prev_np[:, 3] = np.clip(y_prev_np[:, 3], 0.01,   50.0)
+        if not np.isfinite(u_np).all():
+            u_safe = np.array([120.0, 15.0], dtype=np.float64)
+            u_np = np.where(np.isfinite(u_np),
+                             u_np, np.broadcast_to(u_safe, u_np.shape))
+
         mode = getattr(self.hp, "physics_mode", "full")
         if mode == "none":
             # NN learns everything; physics is identity. Equivalent to plain NARX.
@@ -389,6 +410,16 @@ class ResPhysNARXModel:
                 pred_n = self._forward_norm(feat_t, y_prev_t, u_t
                                               ).cpu().numpy()
                 pred = self.y_norm.inverse(pred_n)[0]
+                # Hard physical clamps - prevents runaway autoregressive
+                # divergence from poisoning the windowed input on the next
+                # step. Values outside these bounds are non-physical anyway.
+                if not np.isfinite(pred).all():
+                    pred = np.array([0.001, 350.0, 320.0, 1.0],
+                                      dtype=np.float32)
+                pred[0] = np.clip(pred[0], 0.0,    10.0)
+                pred[1] = np.clip(pred[1], 200.0, 600.0)
+                pred[2] = np.clip(pred[2], 200.0, 600.0)
+                pred[3] = np.clip(pred[3], 0.01,   50.0)
                 y_pred[t] = pred
         self.net.train()
         return y_pred

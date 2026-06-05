@@ -33,12 +33,30 @@ from data_gen import (gen_grid_train_val_split, gen_train_val_split,
 from resphys_narx import (ResPhysNARXHparams, ResPhysNARXModel)
 
 
-# Paper Table 2 reference numbers (we COMPARE against these; we don't try
-# to reproduce them - see README)
-PAPER_REF = {
+# Paper reference numbers (we COMPARE against these; we don't try to
+# reproduce them - see README).  Table 2 = noiseless; Table 6 = noisy.
+PAPER_REF_T2 = {
     "narx_t1":    0.001508, "narx_t2":    0.01934,
     "pinarx_t1":  0.001242, "pinarx_t2":  0.01556,
 }
+PAPER_REF_T6 = {
+    "snr35":  {"narx_t1": 0.009947, "narx_t2": 0.03369,
+                "pinarx_t1": 0.009269, "pinarx_t2": 0.02937},
+    "snr100": {"narx_t1": 0.009771, "narx_t2": 0.03321,
+                "pinarx_t1": 0.009049, "pinarx_t2": 0.02916},
+    # snr250 = our own light-noise extension; no paper reference exists.
+    "snr250": {"narx_t1": float("nan"), "narx_t2": float("nan"),
+                "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
+}
+# Back-compat alias for the LEAN tuner + other callers.
+PAPER_REF = PAPER_REF_T2
+
+
+def _pick_paper_ref(noise: str | None) -> dict:
+    """Return the right paper reference column for the given noise level."""
+    if noise is None:
+        return PAPER_REF_T2
+    return PAPER_REF_T6.get(noise, PAPER_REF_T2)
 
 
 def build_hparams(overrides: dict | None = None) -> ResPhysNARXHparams:
@@ -144,7 +162,8 @@ def run_trial(hp_overrides: dict | None = None,
         # (the harder one) - rewards balanced interpolation+extrapolation.
         # Optimizer minimizes this.
         "objective":  float(0.5 * mae_t1_os + 0.5 * mae_t2_os),
-        "paper_ref":  PAPER_REF,
+        "paper_ref":  _pick_paper_ref(noise),
+        "paper_ref_label": ("Table 6 / " + noise) if noise else "Table 2 (noiseless)",
         "fig_paths":  fig_paths,
     }
 
@@ -162,6 +181,8 @@ def print_summary(result: dict, save_to: str | None = None):
     print(f"  val loss:      {result['val_loss']:.4e}")
     print()
     p = result["paper_ref"]
+    print(f"  reference:     paper {result.get('paper_ref_label', 'Table 2')}")
+    print()
     print(f"  {'metric':<24}{'ours':>14}{'paper NARX':>14}{'paper PI-NARX':>16}")
     print(f"  {'-'*68}")
     print(f"  {'Test 1 one-step MAE':<24}"
