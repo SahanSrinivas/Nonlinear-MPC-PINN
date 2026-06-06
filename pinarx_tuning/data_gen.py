@@ -279,26 +279,24 @@ def gen_test2_set(p: CSTRParams | None = None) -> dict:
 # ============================================================================
 def add_noise(y: np.ndarray, snr_per_channel: list[float],
                seed: int = 0) -> np.ndarray:
-    """Add Gaussian measurement noise with the per-channel SNR (power ratio).
+    """Add Gaussian measurement noise with the per-channel SNR.
 
     Paper §4.6 quotes "SNR represents the ratio of a signal's power to the
     corresponding noise amplitude" with SNR=35 (for C_A) and SNR=100 (for
-    T, T_c, h). We interpret SNR as the standard **signal-processing
-    power-ratio** convention:
+    T, T_c, h). We use the **amplitude-ratio** convention:
 
-        SNR  =  signal_power / noise_power
-             =  signal_var   / noise_var
+        SNR  =  signal_std / noise_std
 
     so
 
-        noise_std = signal_std / sqrt(SNR)
+        noise_std = signal_std / SNR
 
-    This is what makes the visible noise on T, T_c, h in paper Figs 7-8
-    (~1-2 K peak-to-peak) match the stated SNR=100 — a dB interpretation
-    would make SNR=100 essentially noiseless, and a linear-amplitude-ratio
-    interpretation makes T noise ~0.1 K which is too small to see. Power
-    ratio gives noise_std ~= signal_std/10 at SNR=100 which matches the
-    paper figures.
+    This gives ~3% noise on C_A at SNR=35 and ~1% on T,T_c,h at SNR=100 -
+    consistent with the visible-but-moderate noise in paper Figs 7-8 and
+    with paper Table 6 PI-NARX MAEs (~0.009 at SNR=35). Earlier versions
+    used the signal-processing power-ratio formula (signal_std / sqrt(SNR))
+    which gave ~7x more noise on C_A and made our reproduction 5-7x worse
+    than paper PI-NARX. See `git log -p data_gen.py` for the migration.
 
     Use SNR > 1e6 to effectively disable noise on a channel.
     """
@@ -308,7 +306,7 @@ def add_noise(y: np.ndarray, snr_per_channel: list[float],
         sig = float(np.std(y[:, c]))
         if sig == 0.0 or not math.isfinite(snr) or snr <= 0.0 or snr > 1e6:
             continue
-        sigma_noise = sig / math.sqrt(snr)
+        sigma_noise = sig / snr
         y_noisy[:, c] = y[:, c] + rng.normal(0.0, sigma_noise, size=y.shape[0])
     return y_noisy.astype(y.dtype)
 
