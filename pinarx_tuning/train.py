@@ -51,6 +51,11 @@ PAPER_REF_T6 = {
                 "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
     "snr250": {"narx_t1": float("nan"), "narx_t2": float("nan"),
                 "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
+    # Stress profiles - no paper baseline (we added 3x T,T_c noise).
+    "snr35_t3x":  {"narx_t1": float("nan"), "narx_t2": float("nan"),
+                    "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
+    "snr100_t3x": {"narx_t1": float("nan"), "narx_t2": float("nan"),
+                    "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
 }
 # Back-compat alias for the LEAN tuner + other callers.
 PAPER_REF = PAPER_REF_T2
@@ -219,10 +224,12 @@ def _parse_args():
     ap.add_argument("--qf-levels", type=int, default=10)
     ap.add_argument("--qc-levels", type=int, default=10)
     ap.add_argument("--noise",  choices=[None, "snr35", "snr75", "snr100",
-                                            "snr125", "snr250"],
+                                            "snr125", "snr250",
+                                            "snr35_t3x", "snr100_t3x"],
                     default=None,
                     help="None=noiseless; snr35/snr100=paper Table 6; "
-                         "snr75/snr125=mid-noise sweep; snr250=light-noise.")
+                         "snr75/snr125=mid-noise sweep; snr250=light-noise; "
+                         "*_t3x = stress (3x T,T_c noise).")
     ap.add_argument("--protocol", choices=["grid", "aprbs"], default="grid",
                     help="grid (10x10 open-interval, default) | aprbs "
                          "(paper-exact 5000-min APRBS, 2000/3000 split)")

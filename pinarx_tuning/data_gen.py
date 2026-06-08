@@ -313,17 +313,21 @@ def add_noise(y: np.ndarray, snr_per_channel: list[float],
 
 # Per-channel SNR vectors.
 # Label refers to the C_A SNR ratio (paper Table 6 convention).
-# T and T_c carry 3x the per-amplitude noise (effective SNR = 100/3 ~ 33.33)
-# so the reactor + coolant temperature noise becomes visible in Figs 7-8
-# and stresses the autoregressive rollout. h stays at SNR=100.
-_T_SNR_3X = 100.0 / 3.0   # ~ 33.333  -> 3x more noise than SNR=100
+# T, T_c, h stay at SNR=100 in the paper-faithful profiles.
+# Stress profiles (*_t3x) use 3x the per-amplitude noise on T and T_c
+# (effective SNR ~ 33.33) - used to test residual_l2 sensitivity.
+_T_SNR_3X = 100.0 / 3.0
 
 NOISE_PROFILES = {
-    "snr35":  [35.0,  _T_SNR_3X, _T_SNR_3X, 100.0],   # paper Table 6 case 1
-    "snr75":  [75.0,  _T_SNR_3X, _T_SNR_3X, 100.0],   # new mid-noise sweep
-    "snr100": [100.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # paper Table 6 case 2
-    "snr125": [125.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # new low-noise sweep
-    "snr250": [250.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # very-light C_A noise
+    # Paper-faithful: T,T_c,h all at SNR=100
+    "snr35":  [35.0,  100.0, 100.0, 100.0],   # paper Table 6 case 1
+    "snr75":  [75.0,  100.0, 100.0, 100.0],   # new mid-noise sweep
+    "snr100": [100.0, 100.0, 100.0, 100.0],   # paper Table 6 case 2
+    "snr125": [125.0, 100.0, 100.0, 100.0],   # new low-noise sweep
+    "snr250": [250.0, 100.0, 100.0, 100.0],   # very-light C_A noise
+    # Stress profiles: 3x the T,T_c noise (~3% of signal each)
+    "snr35_t3x":  [35.0,  _T_SNR_3X, _T_SNR_3X, 100.0],
+    "snr100_t3x": [100.0, _T_SNR_3X, _T_SNR_3X, 100.0],
 }
 
 # Back-compat aliases for callers still importing the old constants.
