@@ -44,7 +44,11 @@ PAPER_REF_T6 = {
                 "pinarx_t1": 0.009269, "pinarx_t2": 0.02937},
     "snr100": {"narx_t1": 0.009771, "narx_t2": 0.03321,
                 "pinarx_t1": 0.009049, "pinarx_t2": 0.02916},
-    # snr250 = our own light-noise extension; no paper reference exists.
+    # snr75 / snr125 / snr250 = our own sweep extensions; no paper ref exists.
+    "snr75":  {"narx_t1": float("nan"), "narx_t2": float("nan"),
+                "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
+    "snr125": {"narx_t1": float("nan"), "narx_t2": float("nan"),
+                "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
     "snr250": {"narx_t1": float("nan"), "narx_t2": float("nan"),
                 "pinarx_t1": float("nan"), "pinarx_t2": float("nan")},
 }
@@ -214,10 +218,11 @@ def _parse_args():
     ap.add_argument("--seed",   type=int, default=0)
     ap.add_argument("--qf-levels", type=int, default=10)
     ap.add_argument("--qc-levels", type=int, default=10)
-    ap.add_argument("--noise",  choices=[None, "snr35", "snr100", "snr250"],
+    ap.add_argument("--noise",  choices=[None, "snr35", "snr75", "snr100",
+                                            "snr125", "snr250"],
                     default=None,
                     help="None=noiseless; snr35/snr100=paper Table 6; "
-                         "snr250=light-noise (ablation)")
+                         "snr75/snr125=mid-noise sweep; snr250=light-noise.")
     ap.add_argument("--protocol", choices=["grid", "aprbs"], default="grid",
                     help="grid (10x10 open-interval, default) | aprbs "
                          "(paper-exact 5000-min APRBS, 2000/3000 split)")

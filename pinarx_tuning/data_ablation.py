@@ -112,7 +112,8 @@ def main():
                     default=[200, 500, 1000, 2000])
     ap.add_argument("--epochs",     type=int, default=1000)
     ap.add_argument("--lbfgs",      type=int, default=1000)
-    ap.add_argument("--noise",      choices=[None, "snr35", "snr100"],
+    ap.add_argument("--noise",      choices=[None, "snr35", "snr75", "snr100",
+                                                  "snr125", "snr250"],
                     default=None)
     ap.add_argument("--out-dir",    default="runs/data_ablation")
     args = ap.parse_args()

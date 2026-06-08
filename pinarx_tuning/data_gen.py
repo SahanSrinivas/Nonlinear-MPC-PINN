@@ -311,17 +311,25 @@ def add_noise(y: np.ndarray, snr_per_channel: list[float],
     return y_noisy.astype(y.dtype)
 
 
-# Paper Table 6 standard SNR vectors
-SNR_T6_NOISY_LO  = [35.0,  100.0, 100.0, 100.0]   # "SNR 35"  row (paper Table 6)
-SNR_T6_NOISY_HI  = [100.0, 100.0, 100.0, 100.0]   # "SNR 100" row (paper Table 6)
-SNR_T6_NOISY_VHI = [250.0, 100.0, 100.0, 100.0]   # "SNR 250" - light-noise extension
+# Per-channel SNR vectors.
+# Label refers to the C_A SNR ratio (paper Table 6 convention).
+# T and T_c carry 3x the per-amplitude noise (effective SNR = 100/3 ~ 33.33)
+# so the reactor + coolant temperature noise becomes visible in Figs 7-8
+# and stresses the autoregressive rollout. h stays at SNR=100.
+_T_SNR_3X = 100.0 / 3.0   # ~ 33.333  -> 3x more noise than SNR=100
 
-# Convenience dict for callers that route by string label.
 NOISE_PROFILES = {
-    "snr35":  SNR_T6_NOISY_LO,
-    "snr100": SNR_T6_NOISY_HI,
-    "snr250": SNR_T6_NOISY_VHI,
+    "snr35":  [35.0,  _T_SNR_3X, _T_SNR_3X, 100.0],   # paper Table 6 case 1
+    "snr75":  [75.0,  _T_SNR_3X, _T_SNR_3X, 100.0],   # new mid-noise sweep
+    "snr100": [100.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # paper Table 6 case 2
+    "snr125": [125.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # new low-noise sweep
+    "snr250": [250.0, _T_SNR_3X, _T_SNR_3X, 100.0],   # very-light C_A noise
 }
+
+# Back-compat aliases for callers still importing the old constants.
+SNR_T6_NOISY_LO  = NOISE_PROFILES["snr35"]
+SNR_T6_NOISY_HI  = NOISE_PROFILES["snr100"]
+SNR_T6_NOISY_VHI = NOISE_PROFILES["snr250"]
 
 
 # ============================================================================
