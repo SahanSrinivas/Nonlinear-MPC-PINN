@@ -357,6 +357,7 @@ def tune(study_name: str = "resphys_default",
            seed: int = 0,
            device: str = "cuda",
            out_root: str = "runs",
+           warm_start: str | None = None,   # path to a best.json to seed trial 0
            ) -> dict:
     """Run an LLMAgentOpt tuning study. Returns the best trial dict."""
     # Accept "lean3" as a backward-compat alias for "llm_agent_opt"
@@ -382,6 +383,22 @@ def tune(study_name: str = "resphys_default",
 
     results: list[dict] = []
     last_hp = build_hparams({"seed": seed, "device": device}).__dict__
+
+    # ----- Optional manual warm-start: seed trial 0 with a known-good config -----
+    if warm_start:
+        warm_path = Path(warm_start)
+        if not warm_path.exists():
+            raise FileNotFoundError(f"--warm-start file not found: {warm_path}")
+        warm_data = json.loads(warm_path.read_text())
+        warm_hp = warm_data.get("hp", warm_data)   # accept best.json or raw hp
+        warm_cfg = _filter_to_search_space(dict(warm_hp))
+        if warm_cfg:
+            study.enqueue_trial(warm_cfg)
+            log(f"  warm-start (manual): enqueued from {warm_path.name}")
+            log(f"                       hp -> {json.dumps(warm_cfg, default=str)}")
+            last_hp = warm_hp
+        else:
+            log(f"  warm-start: no valid params extracted from {warm_path.name}")
 
     def objective(trial: optuna.Trial) -> float:
         # If a config was enqueued (by LLM), Optuna fills `trial.params` with it.
@@ -510,11 +527,17 @@ if __name__ == "__main__":
                     help="none=pure TPE; llambo=warm-start only; "
                          "llm_agent_opt=full 3-agent loop (recommended). "
                          "'lean3' is kept as a backward-compat alias.")
-    ap.add_argument("--noise",      choices=[None, "snr35", "snr100",
-                                                 "snr250"],
+    ap.add_argument("--noise",      choices=[None, "snr35", "snr75", "snr100",
+                                                 "snr125", "snr250",
+                                                 "snr35_t3x", "snr100_t3x"],
                     default=None,
                     help="None=noiseless; snr35/snr100=paper Table 6; "
-                         "snr250=light-noise (LLMAgentOpt vs TPE ablation)")
+                         "snr75/snr125=mid-noise sweep; snr250=light-noise; "
+                         "*_t3x = stress (3x T,T_c noise).")
+    ap.add_argument("--warm-start", default=None,
+                    help="Path to a best.json (or any JSON with an 'hp' key) "
+                         "whose config is enqueued as trial 0. Lets you "
+                         "refine a manually-found champion via LLMAgentOpt.")
     ap.add_argument("--protocol",   choices=["grid", "aprbs"], default="grid",
                     help="grid (10x10 open-interval, default) | aprbs "
                          "(paper-exact 5000-min APRBS, 2000/3000 split). "
@@ -530,4 +553,5 @@ if __name__ == "__main__":
                   mode=args.mode, noise=args.noise, protocol=args.protocol,
                   llm_ratio=args.llm_ratio,
                   qf_levels=args.qf_levels, qc_levels=args.qc_levels,
-                  seed=args.seed, device=args.device)
+                  seed=args.seed, device=args.device,
+                  warm_start=args.warm_start)
